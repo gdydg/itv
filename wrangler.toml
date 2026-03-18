@@ -15,5 +15,5 @@ id = "a089b1636c7b49d885e4ffe8dc2c4e17"
 
 # 环境变量 (设置管理员默认账号密码，可在后台修改)
 [vars]
-DEFAULT_ADMIN_USER = "满船清梦压星河"
+DEFAULT_ADMIN_USER = "ikun"
 DEFAULT_ADMIN_PASS = "03040404aA@"
