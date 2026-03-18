@@ -6,10 +6,4 @@ compatibility_date = "2023-10-25"
 [triggers]
 crons = ["*/10 * * * *"]
 
-# KV 命名空间绑定
-# 注意：部署前，请先在终端运行 `npx wrangler kv:namespace create IPTV_KV`
-# 然后将生成的 id 填入下方
-[[kv_namespaces]]
-binding = "IPTV_KV"
-id = "a089b1636c7b49d885e4ffe8dc2c4e17"
 
