@@ -48,7 +48,7 @@ async function handlePlay(request, env, url) {
   if (!token) return new Response('Missing Token', { status: 401 });
 
   const tokenLimitStr = await env.IPTV_KV.get('token:' + token);
-  if (!tokenLimitStr) return new Response('Invalid Token', { status: 403 });
+  if (!tokenLimitStr) return new Response('Invalid Token or Token Expired', { status: 403 });
   
   const limit = parseInt(tokenLimitStr);
   const clientIP = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
@@ -56,7 +56,10 @@ async function handlePlay(request, env, url) {
   let ips = await env.IPTV_KV.get('ips:' + token, 'json') || [];
   if (!ips.includes(clientIP)) {
     if (ips.length >= limit) {
-      return new Response('IP Limit Exceeded', { status: 403 });
+      // 【核心功能 1】发现溢出 IP 访问，直接删除该 Token 和相关记录
+      await env.IPTV_KV.delete('token:' + token);
+      await env.IPTV_KV.delete('ips:' + token);
+      return new Response('Security Triggered: IP limit exceeded. This Token has been permanently disabled.', { status: 403 });
     }
     ips.push(clientIP);
     await env.IPTV_KV.put('ips:' + token, JSON.stringify(ips));
@@ -145,7 +148,7 @@ async function generateUserM3U(request, env, url) {
   if (!token) return new Response('Missing Token', { status: 401 });
 
   const isValid = await env.IPTV_KV.get('token:' + token);
-  if (!isValid) return new Response('Invalid Token', { status: 403 });
+  if (!isValid) return new Response('Invalid Token or Expired', { status: 403 });
 
   const channelsStr = await env.IPTV_KV.get('data:channels');
   const channels = JSON.parse(channelsStr || '[]');
@@ -204,14 +207,30 @@ async function handleAdminAPI(request, env, url) {
       const t = k.name.replace('token:', '');
       const limit = await env.IPTV_KV.get(k.name);
       const ips = await env.IPTV_KV.get('ips:' + t, 'json') || [];
-      return { token: t, limit: parseInt(limit), used: ips.length, ips };
+      
+      let expireText = '永久有效';
+      if (k.expiration) {
+        // KV 返回的 expiration 是秒级时间戳，转为东八区时间展示
+        const d = new Date(k.expiration * 1000);
+        expireText = d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+      }
+
+      return { token: t, limit: parseInt(limit), used: ips.length, ips: ips, expireText: expireText };
     }));
     return Response.json(tokens);
   }
 
   if (request.method === 'POST' && route === 'token') {
     const body = await request.json();
-    await env.IPTV_KV.put('token:' + body.token, body.limit.toString());
+    const options = {};
+    
+    // 【核心功能 2】利用 KV 原生的 expirationTtl 设置存活时间
+    if (body.expireHours && Number(body.expireHours) > 0) {
+       // expirationTtl 必须以秒为单位，且最小值为 60 秒
+       options.expirationTtl = Math.max(60, Number(body.expireHours) * 3600);
+    }
+
+    await env.IPTV_KV.put('token:' + body.token, body.limit.toString(), options);
     return Response.json({ success: true });
   }
 
@@ -272,14 +291,15 @@ function renderAdminPage() {
   <title>M3U Proxy 管理后台</title>
   <style>
     body { font-family: system-ui, sans-serif; background: #f9fafb; margin: 0; padding: 20px; }
-    .container { max-width: 800px; margin: auto; }
+    .container { max-width: 900px; margin: auto; }
     .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
     h2 { margin-top: 0; }
-    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 70%; box-sizing: border-box; }
+    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
     button { background: #10b981; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
     button.danger { background: #ef4444; }
-    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
     th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+    .warning-text { color: #ef4444; font-size: 12px; margin-top: 5px; }
   </style>
 </head>
 <body>
@@ -289,19 +309,30 @@ function renderAdminPage() {
     <div class="card">
       <h2>1. 原始直播源设置</h2>
       <p>当前状态：频道数 <span id="chCount">0</span></p>
-      <input type="text" id="sourceUrl" placeholder="输入 M3U 订阅链接">
+      <input type="text" id="sourceUrl" placeholder="输入 M3U 订阅链接" style="width: 70%;">
       <button onclick="saveConfig()">保存</button>
       <button onclick="syncM3U()" style="background:#3b82f6;">立即抓取更新</button>
     </div>
 
     <div class="card">
       <h2>2. Token 管理</h2>
-      <input type="text" id="newToken" placeholder="自定义 Token (字母/数字)" style="width: 40%;">
-      <input type="number" id="newLimit" placeholder="允许IP数" value="3" style="width: 20%;">
-      <button onclick="addToken()">添加 Token</button>
+      <p class="warning-text">注：如果请求的 IP 数量超过限制，Token 将被自动且永久地删除作废。</p>
+      
+      <div style="display:flex; gap: 10px; margin-bottom: 10px;">
+        <input type="text" id="newToken" placeholder="自定义 Token" style="flex: 2;">
+        <input type="number" id="newLimit" placeholder="最大允许IP数" value="3" style="flex: 1;">
+        <input type="number" id="expireHours" placeholder="有效期(小时)，留空为永久" style="flex: 1.5;">
+        <button onclick="addToken()" style="flex: 1;">生成 Token</button>
+      </div>
       
       <table>
-        <thead><tr><th>Token</th><th>IP 限制</th><th>已用 IP</th><th>操作</th></tr></thead>
+        <thead><tr>
+          <th>Token</th>
+          <th>IP 限制</th>
+          <th>已用 IP</th>
+          <th>过期时间</th>
+          <th>操作</th>
+        </tr></thead>
         <tbody id="tokenList"></tbody>
       </table>
     </div>
@@ -326,6 +357,7 @@ function renderAdminPage() {
           '<td>' + t.token + '</td>' +
           '<td>' + t.limit + '</td>' +
           '<td><span title="' + ipsStr + '">' + t.used + '</span></td>' +
+          '<td>' + t.expireText + '</td>' +
           '<td><button class="danger" onclick="delToken(\\'' + t.token + '\\')">删除</button></td>' +
         '</tr>';
       }
@@ -352,9 +384,21 @@ function renderAdminPage() {
     async function addToken() {
       const token = document.getElementById('newToken').value;
       const limit = document.getElementById('newLimit').value;
+      const expireHours = document.getElementById('expireHours').value;
+      
       if(!token) return alert('请输入 Token');
-      await fetch('/admin/api/token', { method: 'POST', body: JSON.stringify({ token: token, limit: limit }) });
+      
+      const payload = { 
+        token: token, 
+        limit: limit,
+        expireHours: expireHours
+      };
+
+      await fetch('/admin/api/token', { method: 'POST', body: JSON.stringify(payload) });
+      
+      // 清空输入框
       document.getElementById('newToken').value = '';
+      document.getElementById('expireHours').value = '';
       loadData();
     }
 
