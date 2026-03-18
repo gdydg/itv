@@ -43,37 +43,33 @@ export default {
 
 async function handlePlay(request, env, url) {
   const token = url.searchParams.get('token');
-  // 修复：严谨去除路径前缀和可能存在的尾部斜杠
   const channelId = url.pathname.replace('/play/', '').replace(/\/$/, '');
   
   if (!token) return new Response('Missing Token', { status: 401 });
 
-  // 1. 验证 Token 和 IP 限制
-  const tokenLimitStr = await env.IPTV_KV.get(`token:${token}`);
+  const tokenLimitStr = await env.IPTV_KV.get('token:' + token);
   if (!tokenLimitStr) return new Response('Invalid Token', { status: 403 });
   
   const limit = parseInt(tokenLimitStr);
   const clientIP = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
   
-  let ips = await env.IPTV_KV.get(`ips:${token}`, 'json') || [];
+  let ips = await env.IPTV_KV.get('ips:' + token, 'json') || [];
   if (!ips.includes(clientIP)) {
     if (ips.length >= limit) {
       return new Response('IP Limit Exceeded', { status: 403 });
     }
     ips.push(clientIP);
-    await env.IPTV_KV.put(`ips:${token}`, JSON.stringify(ips));
+    await env.IPTV_KV.put('ips:' + token, JSON.stringify(ips));
   }
 
-  // 2. 查找频道并重定向
   const channelsStr = await env.IPTV_KV.get('data:channels');
   if (!channelsStr) return new Response('No Channels Data', { status: 500 });
   
   const channels = JSON.parse(channelsStr);
   const target = channels.find(c => c.id === channelId);
   
-  if (!target) return new Response(`Channel Not Found: ${channelId}`, { status: 404 });
+  if (!target) return new Response('Channel Not Found: ' + channelId, { status: 404 });
 
-  // 修复：构造带有完善 CORS 头和防缓存的 302 重定向
   return new Response(null, {
     status: 302,
     headers: {
@@ -105,7 +101,6 @@ async function updateM3USource(env) {
   }
 }
 
-// 修复：生成固定的哈希 ID，防止每次同步导致之前生成的链接失效
 function generateFixedId(name, url) {
   const str = name + url;
   let hash = 0;
@@ -127,15 +122,17 @@ function parseM3U(content) {
       const logoMatch = line.match(/tvg-logo="([^"]+)"/);
       const groupMatch = line.match(/group-title="([^"]+)"/);
       info = {
-        name: nameMatch ? nameMatch[1].trim() : `Channel ${i}`,
+        name: nameMatch ? nameMatch[1].trim() : 'Channel ' + i,
         logo: logoMatch ? logoMatch[1] : '',
         group: groupMatch ? groupMatch[1] : 'Default'
       };
     } else if (line.startsWith('http')) {
       channels.push({
-        id: generateFixedId(info.name || '', line), // 使用固定 ID 替代 Math.random
+        id: generateFixedId(info.name || '', line),
         url: line,
-        ...info
+        name: info.name,
+        logo: info.logo,
+        group: info.group
       });
       info = {};
     }
@@ -147,7 +144,7 @@ async function generateUserM3U(request, env, url) {
   const token = url.searchParams.get('token');
   if (!token) return new Response('Missing Token', { status: 401 });
 
-  const isValid = await env.IPTV_KV.get(`token:${token}`);
+  const isValid = await env.IPTV_KV.get('token:' + token);
   if (!isValid) return new Response('Invalid Token', { status: 403 });
 
   const channelsStr = await env.IPTV_KV.get('data:channels');
@@ -156,8 +153,8 @@ async function generateUserM3U(request, env, url) {
   
   let m3u = '#EXTM3U\n';
   channels.forEach(c => {
-    m3u += `#EXTINF:-1 tvg-logo="${c.logo}" group-title="${c.group}",${c.name}\n`;
-    m3u += `${origin}/play/${c.id}?token=${token}\n`;
+    m3u += '#EXTINF:-1 tvg-logo="' + c.logo + '" group-title="' + c.group + '",' + c.name + '\n';
+    m3u += origin + '/play/' + c.id + '?token=' + token + '\n';
   });
 
   return new Response(m3u, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } });
@@ -175,8 +172,8 @@ async function checkAuth(request, env) {
   const decoded = atob(encoded);
   const [user, pass] = decoded.split(':');
   
-  const expectedUser = await env.IPTV_KV.get('config:admin_user') || env.DEFAULT_ADMIN_USER;
-  const expectedPass = await env.IPTV_KV.get('config:admin_pass') || env.DEFAULT_ADMIN_PASS;
+  const expectedUser = await env.IPTV_KV.get('config:admin_user') || env.DEFAULT_ADMIN_USER || 'admin';
+  const expectedPass = await env.IPTV_KV.get('config:admin_pass') || env.DEFAULT_ADMIN_PASS || 'admin123';
   
   return user === expectedUser && pass === expectedPass;
 }
@@ -196,8 +193,8 @@ async function handleAdminAPI(request, env, url) {
   }
 
   if (request.method === 'POST' && route === 'config') {
-    const { sourceUrl } = await request.json();
-    await env.IPTV_KV.put('config:source_url', sourceUrl);
+    const body = await request.json();
+    await env.IPTV_KV.put('config:source_url', body.sourceUrl);
     return Response.json({ success: true });
   }
 
@@ -206,22 +203,22 @@ async function handleAdminAPI(request, env, url) {
     const tokens = await Promise.all(list.keys.map(async k => {
       const t = k.name.replace('token:', '');
       const limit = await env.IPTV_KV.get(k.name);
-      const ips = await env.IPTV_KV.get(`ips:${t}`, 'json') || [];
+      const ips = await env.IPTV_KV.get('ips:' + t, 'json') || [];
       return { token: t, limit: parseInt(limit), used: ips.length, ips };
     }));
     return Response.json(tokens);
   }
 
   if (request.method === 'POST' && route === 'token') {
-    const { token, limit } = await request.json();
-    await env.IPTV_KV.put(`token:${token}`, limit.toString());
+    const body = await request.json();
+    await env.IPTV_KV.put('token:' + body.token, body.limit.toString());
     return Response.json({ success: true });
   }
 
   if (request.method === 'DELETE' && route === 'token') {
-    const { token } = await request.json();
-    await env.IPTV_KV.delete(`token:${token}`);
-    await env.IPTV_KV.delete(`ips:${token}`);
+    const body = await request.json();
+    await env.IPTV_KV.delete('token:' + body.token);
+    await env.IPTV_KV.delete('ips:' + body.token);
     return Response.json({ success: true });
   }
 
@@ -257,7 +254,9 @@ function renderUserPage() {
       const token = document.getElementById('token').value.trim();
       if(!token) return alert('请输入 Token');
       const url = window.location.origin + '/sub?token=' + token;
-      navigator.clipboard.writeText(url).then(() => alert('订阅链接已复制到剪贴板！\\n' + url));
+      navigator.clipboard.writeText(url).then(function() {
+        alert('订阅链接已复制到剪贴板！');
+      });
     }
   </script>
 </body>
@@ -318,14 +317,19 @@ function renderAdminPage() {
       const tokensRes = await fetch('/admin/api/tokens');
       const tokens = await tokensRes.json();
       const tbody = document.getElementById('tokenList');
-      tbody.innerHTML = tokens.map(t => \`
-        <tr>
-          <td>\${t.token}</td>
-          <td>\${t.limit}</td>
-          <td><span title="\${t.ips.join(', ')}">\${t.used}</span></td>
-          <td><button class="danger" onclick="delToken('\${t.token}')">删除</button></td>
-        </tr>
-      \`).join('');
+      
+      let html = '';
+      for(let i = 0; i < tokens.length; i++) {
+        let t = tokens[i];
+        let ipsStr = t.ips.join(', ');
+        html += '<tr>' +
+          '<td>' + t.token + '</td>' +
+          '<td>' + t.limit + '</td>' +
+          '<td><span title="' + ipsStr + '">' + t.used + '</span></td>' +
+          '<td><button class="danger" onclick="delToken(\\'' + t.token + '\\')">删除</button></td>' +
+        '</tr>';
+      }
+      tbody.innerHTML = html;
     }
 
     async function saveConfig() {
@@ -337,7 +341,11 @@ function renderAdminPage() {
     async function syncM3U() {
       const res = await fetch('/admin/api/sync', { method: 'POST' });
       const data = await res.json();
-      alert(data.success ? \`抓取成功，共更新 \${data.count} 个频道\` : '抓取失败: ' + data.msg);
+      if(data.success) {
+        alert('抓取成功，共更新 ' + data.count + ' 个频道');
+      } else {
+        alert('抓取失败: ' + data.msg);
+      }
       loadData();
     }
 
@@ -345,18 +353,19 @@ function renderAdminPage() {
       const token = document.getElementById('newToken').value;
       const limit = document.getElementById('newLimit').value;
       if(!token) return alert('请输入 Token');
-      await fetch('/admin/api/token', { method: 'POST', body: JSON.stringify({ token, limit }) });
+      await fetch('/admin/api/token', { method: 'POST', body: JSON.stringify({ token: token, limit: limit }) });
       document.getElementById('newToken').value = '';
       loadData();
     }
 
     async function delToken(token) {
       if(!confirm('确定删除吗？')) return;
-      await fetch('/admin/api/token', { method: 'DELETE', body: JSON.stringify({ token }) });
+      await fetch('/admin/api/token', { method: 'DELETE', body: JSON.stringify({ token: token }) });
       loadData();
     }
 
     loadData();
   </script>
 </body>
-</html>
+</html>`;
+}
