@@ -4,7 +4,7 @@ compatibility_date = "2023-10-25"
 
 # 定时任务：每天凌晨 3:00 (UTC) 自动抓取更新直播源
 [triggers]
-crons = ["0 3 * * *"]
+crons = ["*/10 * * * *"]
 
 # KV 命名空间绑定
 # 注意：部署前，请先在终端运行 `npx wrangler kv:namespace create IPTV_KV`
