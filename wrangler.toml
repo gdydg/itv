@@ -1,0 +1,7 @@
+name = "my-iptv-worker"
+main = "src/index.js"
+compatibility_date = "2024-03-18"
+
+[[kv_namespaces]]
+binding = "IPTV_KV"
+id = "填写你之前获取的_KV_ID"
