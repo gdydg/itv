@@ -126,7 +126,8 @@ function handleNodeLocAuth(request, env, url) {
   const redirectUri = url.origin + '/api/auth/nodeloc/callback';
   const state = crypto.randomUUID();
   
-  const authUrl = 'https://conn.nodeloc.cc/oauth2/auth' + 
+  // 更新为官方的授权端点
+  const authUrl = 'https://www.nodeloc.com/oauth-provider/authorize' + 
     '?client_id=' + env.NODELOC_CLIENT_ID + 
     '&response_type=code' + 
     '&redirect_uri=' + encodeURIComponent(redirectUri) + 
@@ -140,7 +141,8 @@ async function handleNodeLocCallback(request, env, url) {
   const redirectUri = url.origin + '/api/auth/nodeloc/callback';
 
   try {
-    const tokenRes = await fetch('https://conn.nodeloc.cc/oauth2/token', {
+    // 更新为官方的 Token 获取端点
+    const tokenRes = await fetch('https://www.nodeloc.com/oauth-provider/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
       body: new URLSearchParams({
@@ -154,7 +156,8 @@ async function handleNodeLocCallback(request, env, url) {
     if (!tokenRes.ok) throw new Error('Failed to fetch access token');
     const tokenData = await tokenRes.json();
 
-    const userRes = await fetch('https://conn.nodeloc.cc/oauth2/userinfo', {
+    // 更新为官方的用户信息获取端点
+    const userRes = await fetch('https://www.nodeloc.com/oauth-provider/userinfo', {
       headers: { 
         'Authorization': 'Bearer ' + tokenData.access_token,
         'Accept': 'application/json'
@@ -163,6 +166,7 @@ async function handleNodeLocCallback(request, env, url) {
     if (!userRes.ok) throw new Error('Failed to fetch user info');
     const userData = await userRes.json();
     
+    // 兼容取值，提取用户名
     let rawUsername = userData.username || userData.preferred_username || userData.name || userData.sub || 'user_' + Math.random().toString(36).substr(2, 5);
     if (userData.data && userData.data.attributes) {
       rawUsername = userData.data.attributes.username;
