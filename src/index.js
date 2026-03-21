@@ -126,7 +126,6 @@ function handleNodeLocAuth(request, env, url) {
   const redirectUri = url.origin + '/api/auth/nodeloc/callback';
   const state = crypto.randomUUID();
   
-  // 更新为官方的授权端点
   const authUrl = 'https://www.nodeloc.com/oauth-provider/authorize' + 
     '?client_id=' + env.NODELOC_CLIENT_ID + 
     '&response_type=code' + 
@@ -141,7 +140,6 @@ async function handleNodeLocCallback(request, env, url) {
   const redirectUri = url.origin + '/api/auth/nodeloc/callback';
 
   try {
-    // 更新为官方的 Token 获取端点
     const tokenRes = await fetch('https://www.nodeloc.com/oauth-provider/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
@@ -156,7 +154,6 @@ async function handleNodeLocCallback(request, env, url) {
     if (!tokenRes.ok) throw new Error('Failed to fetch access token');
     const tokenData = await tokenRes.json();
 
-    // 更新为官方的用户信息获取端点
     const userRes = await fetch('https://www.nodeloc.com/oauth-provider/userinfo', {
       headers: { 
         'Authorization': 'Bearer ' + tokenData.access_token,
@@ -166,7 +163,6 @@ async function handleNodeLocCallback(request, env, url) {
     if (!userRes.ok) throw new Error('Failed to fetch user info');
     const userData = await userRes.json();
     
-    // 兼容取值，提取用户名
     let rawUsername = userData.username || userData.preferred_username || userData.name || userData.sub || 'user_' + Math.random().toString(36).substr(2, 5);
     if (userData.data && userData.data.attributes) {
       rawUsername = userData.data.attributes.username;
@@ -230,19 +226,16 @@ async function handlePlay(request, env, url) {
   });
 }
 
-// 支持多源抓取与去重
 async function updateM3USource(env) {
   const sourceUrlsStr = await env.IPTV_KV.get('config:source_url');
   if (!sourceUrlsStr) return { success: false, msg: 'No source URL configured' };
 
-  // 支持通过换行符或逗号分隔多个 URL，并过滤掉空行
   const urls = sourceUrlsStr.split(/[\n,]+/).map(u => u.trim()).filter(u => u);
   if (urls.length === 0) return { success: false, msg: 'No valid URLs found in config' };
 
   let allChannels = [];
   let errors = [];
 
-  // 遍历所有链接进行抓取
   for (const url of urls) {
     try {
       const res = await fetch(url);
@@ -255,7 +248,6 @@ async function updateM3USource(env) {
     }
   }
 
-  // 根据生成的固定 ID 进行去重 (防止不同源有完全重复的频道)
   const uniqueChannels = [];
   const seenIds = new Set();
   for (const ch of allChannels) {
@@ -370,6 +362,12 @@ async function handleUserAPI(request, env, url) {
   const username = await getUserSession(request, env);
   if (!username) return Response.json({ success: false, msg: '未登录' }, { status: 401 });
 
+  // === 新增获取系统通知接口 ===
+  if (request.method === 'GET' && route === 'announcement') {
+    const announcement = await env.IPTV_KV.get('config:announcement') || '';
+    return Response.json({ announcement });
+  }
+
   if (request.method === 'POST' && route === 'bind') {
     const body = await request.json();
     const tokenExists = await env.IPTV_KV.get('token:' + body.token);
@@ -458,8 +456,10 @@ async function handleAdminAPI(request, env, url) {
   
   if (request.method === 'GET' && route === 'status') {
     const sourceUrl = await env.IPTV_KV.get('config:source_url') || '';
+    // 获取当前通知
+    const announcement = await env.IPTV_KV.get('config:announcement') || '';
     const channels = JSON.parse(await env.IPTV_KV.get('data:channels') || '[]');
-    return Response.json({ sourceUrl, channelCount: channels.length });
+    return Response.json({ sourceUrl, announcement, channelCount: channels.length });
   }
   
   if (request.method === 'POST' && route === 'sync') {
@@ -470,6 +470,13 @@ async function handleAdminAPI(request, env, url) {
   if (request.method === 'POST' && route === 'config') {
     const body = await request.json();
     await env.IPTV_KV.put('config:source_url', body.sourceUrl);
+    return Response.json({ success: true });
+  }
+
+  // === 新增保存通知接口 ===
+  if (request.method === 'POST' && route === 'announcement') {
+    const body = await request.json();
+    await env.IPTV_KV.put('config:announcement', body.announcement || '');
     return Response.json({ success: true });
   }
 
@@ -591,12 +598,15 @@ function renderUserDashboard(username) {
   '    body { font-family: system-ui; background: #f9fafb; margin: 0; padding: 20px; }\n' +
   '    .container { max-width: 800px; margin: auto; }\n' +
   '    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }\n' +
+  '    .notice-card { background: #eff6ff; border-left: 4px solid #3b82f6; color: #1e3a8a; }\n' +
+  '    .notice-card h3 { margin-top: 0; font-size: 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 5px; }\n' +
   '    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }\n' +
   '    button { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }\n' +
   '    button.warning { background: #f59e0b; }\n' +
   '    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }\n' +
   '    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }\n' +
-  '    .header { display: flex; justify-content: space-between; align-items: center; }\n' +
+  '    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }\n' +
+  '    .header h1 { margin: 0; }\n' +
   '  </style>\n' +
   '</head>\n' +
   '<body>\n' +
@@ -605,6 +615,13 @@ function renderUserDashboard(username) {
   '      <h1>欢迎回来, ' + username + '</h1>\n' +
   '      <button class="warning" onclick="logout()">退出登录</button>\n' +
   '    </div>\n' +
+  '    \n' +
+  '    <!-- 通知横幅容器 -->\n' +
+  '    <div id="noticeBox" class="card notice-card" style="display: none;">\n' +
+  '      <h3>🔔 系统通知</h3>\n' +
+  '      <div id="noticeContent" style="line-height: 1.5;"></div>\n' +
+  '    </div>\n' +
+  '\n' +
   '    <div class="card">\n' +
   '      <h2>绑定新 Token</h2>\n' +
   '      <p>请输入管理员分发给您的 Token 激活码进行绑定：</p>\n' +
@@ -626,6 +643,16 @@ function renderUserDashboard(username) {
   '    </div>\n' +
   '  </div>\n' +
   '  <script>\n' +
+  '    async function loadNotice() {\n' +
+  '      try {\n' +
+  '        const res = await fetch(\'/api/user/announcement\');\n' +
+  '        const data = await res.json();\n' +
+  '        if (data.announcement && data.announcement.trim() !== \'\') {\n' +
+  '          document.getElementById(\'noticeContent\').innerHTML = data.announcement.replace(/\\n/g, \'<br>\');\n' +
+  '          document.getElementById(\'noticeBox\').style.display = \'block\';\n' +
+  '        }\n' +
+  '      } catch(e) {}\n' +
+  '    }\n' +
   '    async function loadData() {\n' +
   '      const res = await fetch(\'/api/user/tokens\');\n' +
   '      const data = await res.json();\n' +
@@ -665,6 +692,7 @@ function renderUserDashboard(username) {
   '    function copy(text) {\n' +
   '      navigator.clipboard.writeText(text).then(() => alert(\'已复制！\'));\n' +
   '    }\n' +
+  '    loadNotice();\n' +
   '    loadData();\n' +
   '  </script>\n' +
   '</body>\n' +
@@ -685,6 +713,7 @@ function renderAdminPage() {
   '    button { background: #10b981; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }\n' +
   '    button.danger { background: #ef4444; }\n' +
   '    button.warning { background: #f59e0b; }\n' +
+  '    button.blue { background: #3b82f6; }\n' +
   '    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }\n' +
   '    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }\n' +
   '  </style>\n' +
@@ -692,15 +721,25 @@ function renderAdminPage() {
   '<body>\n' +
   '  <div class="container">\n' +
   '    <h1>管理后台</h1>\n' +
+  '    \n' +
   '    <div class="card">\n' +
-  '      <h2>1. 原始直播源</h2>\n' +
+  '      <h2>1. 系统通知管理</h2>\n' +
+  '      <p style="color:#666; font-size:12px;">在此处发布的通知将显示在所有用户的控制台顶部（支持插入基础的 HTML 标签，如 &lt;a href="..."&gt; 链接）。</p>\n' +
+  '      <textarea id="adminAnnouncement" placeholder="输入要发布的通知内容... 留空则不显示通知" rows="3" style="width: 100%; box-sizing: border-box; resize: vertical; margin-bottom: 10px;"></textarea><br>\n' +
+  '      <button class="blue" onclick="saveAnnouncement()">发布 / 更新通知</button>\n' +
+  '      <button class="danger" onclick="clearAnnouncement()" style="margin-left: 10px;">清空通知</button>\n' +
+  '    </div>\n' +
+  '\n' +
+  '    <div class="card">\n' +
+  '      <h2>2. 原始直播源</h2>\n' +
   '      <p>有效去重频道数 <span id="chCount">0</span></p>\n' +
   '      <textarea id="sourceUrl" placeholder="输入 M3U 订阅链接，支持多个源，请每行输入一个链接" rows="4" style="width: 100%; box-sizing: border-box; resize: vertical; margin-bottom: 10px;"></textarea><br>\n' +
-  '      <button onclick="saveConfig()">保存配置</button>\n' +
-  '      <button onclick="syncM3U()" style="background:#3b82f6;">立即抓取/更新</button>\n' +
+  '      <button onclick="saveConfig()">保存源配置</button>\n' +
+  '      <button class="blue" onclick="syncM3U()" style="margin-left: 10px;">立即抓取/更新</button>\n' +
   '    </div>\n' +
+  '\n' +
   '    <div class="card">\n' +
-  '      <h2>2. Token 管理 (激活码)</h2>\n' +
+  '      <h2>3. Token 管理 (激活码)</h2>\n' +
   '      <p style="color:#666; font-size:12px;">给用户分发下方的 Token。IP限制填 0 代表无限IP。</p>\n' +
   '      <div style="display:flex; gap: 10px; margin-bottom: 10px;">\n' +
   '        <input type="text" id="newToken" placeholder="生成新 Token" style="flex: 2;">\n' +
@@ -721,7 +760,9 @@ function renderAdminPage() {
   '      const statusRes = await fetch(\'/admin/api/status\');\n' +
   '      const status = await statusRes.json();\n' +
   '      document.getElementById(\'sourceUrl\').value = status.sourceUrl;\n' +
+  '      document.getElementById(\'adminAnnouncement\').value = status.announcement || \'\';\n' +
   '      document.getElementById(\'chCount\').innerText = status.channelCount;\n' +
+  '      \n' +
   '      const tokensRes = await fetch(\'/admin/api/tokens\');\n' +
   '      const tokens = await tokensRes.json();\n' +
   '      const tbody = document.getElementById(\'tokenList\');\n' +
@@ -742,10 +783,19 @@ function renderAdminPage() {
   '      }\n' +
   '      tbody.innerHTML = html;\n' +
   '    }\n' +
+  '    async function saveAnnouncement() {\n' +
+  '      const text = document.getElementById(\'adminAnnouncement\').value;\n' +
+  '      await fetch(\'/admin/api/announcement\', { method: \'POST\', body: JSON.stringify({ announcement: text }) });\n' +
+  '      alert(\'通知更新成功！\');\n' +
+  '    }\n' +
+  '    async function clearAnnouncement() {\n' +
+  '      document.getElementById(\'adminAnnouncement\').value = \'\';\n' +
+  '      await saveAnnouncement();\n' +
+  '    }\n' +
   '    async function saveConfig() {\n' +
   '      const url = document.getElementById(\'sourceUrl\').value;\n' +
   '      await fetch(\'/admin/api/config\', { method: \'POST\', body: JSON.stringify({ sourceUrl: url }) });\n' +
-  '      alert(\'保存成功\');\n' +
+  '      alert(\'源配置保存成功\');\n' +
   '    }\n' +
   '    async function syncM3U() {\n' +
   '      const res = await fetch(\'/admin/api/sync\', { method: \'POST\' });\n' +
