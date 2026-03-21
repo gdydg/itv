@@ -230,23 +230,51 @@ async function handlePlay(request, env, url) {
   });
 }
 
+// 核心修改 1：支持多源抓取与去重
 async function updateM3USource(env) {
-  const sourceUrl = await env.IPTV_KV.get('config:source_url');
-  if (!sourceUrl) return { success: false, msg: 'No source URL configured' };
+  const sourceUrlsStr = await env.IPTV_KV.get('config:source_url');
+  if (!sourceUrlsStr) return { success: false, msg: 'No source URL configured' };
 
-  try {
-    const res = await fetch(sourceUrl);
-    const text = await res.text();
-    const channels = parseM3U(text);
-    
-    if (channels.length > 0) {
-      await env.IPTV_KV.put('data:channels', JSON.stringify(channels));
-      return { success: true, count: channels.length };
+  // 支持通过换行符或逗号分隔多个 URL，并过滤掉空行
+  const urls = sourceUrlsStr.split(/[\n,]+/).map(u => u.trim()).filter(u => u);
+  if (urls.length === 0) return { success: false, msg: 'No valid URLs found in config' };
+
+  let allChannels = [];
+  let errors = [];
+
+  // 遍历所有链接进行抓取
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      const channels = parseM3U(text);
+      allChannels = allChannels.concat(channels);
+    } catch (err) {
+      errors.push(`Failed to fetch ${url}: ${err.message}`);
     }
-    return { success: false, msg: 'No valid channels found' };
-  } catch (err) {
-    return { success: false, msg: err.message };
   }
+
+  // 根据生成的固定 ID 进行去重 (防止不同源有完全重复的频道)
+  const uniqueChannels = [];
+  const seenIds = new Set();
+  for (const ch of allChannels) {
+    if (!seenIds.has(ch.id)) {
+      seenIds.add(ch.id);
+      uniqueChannels.push(ch);
+    }
+  }
+
+  if (uniqueChannels.length > 0) {
+    await env.IPTV_KV.put('data:channels', JSON.stringify(uniqueChannels));
+    return { 
+      success: true, 
+      count: uniqueChannels.length, 
+      msg: errors.length > 0 ? `部分成功, 抓取到 ${uniqueChannels.length} 个频道。错误: ${errors.join('; ')}` : `全部抓取成功, 共 ${uniqueChannels.length} 个频道`
+    };
+  }
+  
+  return { success: false, msg: '所有源均未找到有效频道。错误信息: ' + errors.join('; ') };
 }
 
 function generateFixedId(name, url) {
@@ -515,7 +543,7 @@ function renderLoginPage() {
   '    .divider::before { margin-right: 10px; } .divider::after { margin-left: 10px; }\n' +
   '  </style>\n' +
   '</head>\n' +
-  '<body>\n' +
+  <body>\n' +
   '  <div class="card">\n' +
   '    <h2>IPTV 订阅系统</h2>\n' +
   '    <input type="text" id="user" placeholder="用户名">\n' +
@@ -643,6 +671,7 @@ function renderUserDashboard(username) {
   '</html>';
 }
 
+// 核心修改 2：后台页面支持多行输入
 function renderAdminPage() {
   return '<!DOCTYPE html>\n' +
   '<html lang="zh-CN">\n' +
@@ -653,7 +682,7 @@ function renderAdminPage() {
   '    body { font-family: system-ui; background: #f9fafb; margin: 0; padding: 20px; }\n' +
   '    .container { max-width: 900px; margin: auto; }\n' +
   '    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }\n' +
-  '    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }\n' +
+  '    input, textarea { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }\n' +
   '    button { background: #10b981; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }\n' +
   '    button.danger { background: #ef4444; }\n' +
   '    button.warning { background: #f59e0b; }\n' +
@@ -666,10 +695,10 @@ function renderAdminPage() {
   '    <h1>管理后台</h1>\n' +
   '    <div class="card">\n' +
   '      <h2>1. 原始直播源</h2>\n' +
-  '      <p>频道数 <span id="chCount">0</span></p>\n' +
-  '      <input type="text" id="sourceUrl" placeholder="输入 M3U 订阅链接" style="width: 70%;">\n' +
-  '      <button onclick="saveConfig()">保存</button>\n' +
-  '      <button onclick="syncM3U()" style="background:#3b82f6;">立即抓取</button>\n' +
+  '      <p>有效去重频道数 <span id="chCount">0</span></p>\n' +
+  '      <textarea id="sourceUrl" placeholder="输入 M3U 订阅链接，支持多个源，请每行输入一个链接" rows="4" style="width: 100%; box-sizing: border-box; resize: vertical; margin-bottom: 10px;"></textarea><br>\n' +
+  '      <button onclick="saveConfig()">保存配置</button>\n' +
+  '      <button onclick="syncM3U()" style="background:#3b82f6;">立即抓取/更新</button>\n' +
   '    </div>\n' +
   '    <div class="card">\n' +
   '      <h2>2. Token 管理 (激活码)</h2>\n' +
@@ -722,7 +751,7 @@ function renderAdminPage() {
   '    async function syncM3U() {\n' +
   '      const res = await fetch(\'/admin/api/sync\', { method: \'POST\' });\n' +
   '      const data = await res.json();\n' +
-  '      alert(data.success ? \'成功更新频道\' : \'失败: \' + data.msg);\n' +
+  '      if(data.success) { alert(data.msg); } else { alert(\'失败: \' + data.msg); }\n' +
   '      loadData();\n' +
   '    }\n' +
   '    async function addToken() {\n' +
