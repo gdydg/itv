@@ -6,4 +6,9 @@ compatibility_date = "2023-10-25"
 [triggers]
 crons = ["*/10 * * * *"]
 
+# D1 绑定（请替换为你自己的 database_id）
+[[d1_databases]]
+binding = "IPTV_DB"
+database_name = "iptv-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 
