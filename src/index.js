@@ -56,6 +56,103 @@ export default {
   }
 };
 
+const STORE_CACHE = new WeakMap();
+
+function store(env) {
+  const cached = STORE_CACHE.get(env);
+  if (cached) return cached;
+
+  if (!env.IPTV_DB) {
+    throw new Error('Missing D1 binding: IPTV_DB');
+  }
+
+  const d1Store = createD1KVStore(env.IPTV_DB);
+  STORE_CACHE.set(env, d1Store);
+  return d1Store;
+}
+
+function createD1KVStore(db) {
+  let initialized = false;
+
+  async function ensureInit() {
+    if (initialized) return;
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS kv_store (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        expiration INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_kv_store_expiration ON kv_store(expiration);
+    `);
+    initialized = true;
+  }
+
+  async function purgeExpired() {
+    await ensureInit();
+    await db.prepare('DELETE FROM kv_store WHERE expiration IS NOT NULL AND expiration <= unixepoch()').run();
+  }
+
+  return {
+    async get(key, type) {
+      await purgeExpired();
+      const row = await db.prepare('SELECT value FROM kv_store WHERE key = ?').bind(key).first();
+      if (!row) return null;
+      if (type === 'json') {
+        try {
+          return JSON.parse(row.value);
+        } catch (_) {
+          return null;
+        }
+      }
+      return row.value;
+    },
+
+    async put(key, value, options = {}) {
+      await ensureInit();
+      const now = Math.floor(Date.now() / 1000);
+      let expiration = null;
+      if (options.expirationTtl) {
+        expiration = now + Number(options.expirationTtl);
+      } else if (options.expiration) {
+        expiration = Number(options.expiration);
+      }
+
+      const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
+      await db
+        .prepare(`
+          INSERT INTO kv_store(key, value, expiration)
+          VALUES (?, ?, ?)
+          ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            expiration = excluded.expiration
+        `)
+        .bind(key, stringValue, expiration)
+        .run();
+    },
+
+    async delete(key) {
+      await ensureInit();
+      await db.prepare('DELETE FROM kv_store WHERE key = ?').bind(key).run();
+    },
+
+    async list(options = {}) {
+      await purgeExpired();
+      const prefix = options.prefix || '';
+      const rows = await db
+        .prepare('SELECT key, expiration FROM kv_store WHERE key LIKE ? ORDER BY key')
+        .bind(prefix + '%')
+        .all();
+
+      return {
+        keys: (rows.results || []).map((r) => ({
+          name: r.key,
+          expiration: r.expiration || undefined
+        }))
+      };
+    }
+  };
+}
+
 // ================= 会话与鉴权辅助函数 =================
 
 async function getUserSession(request, env) {
@@ -63,7 +160,7 @@ async function getUserSession(request, env) {
   const match = cookieHeader.match(/session_id=([^;]+)/);
   if (!match) return null;
   const sessionId = match[1];
-  return await env.IPTV_KV.get('session:' + sessionId);
+  return await store(env).get('session:' + sessionId);
 }
 
 // ================= Linux DO OAuth2 逻辑 =================
@@ -108,7 +205,7 @@ async function handleLinuxDoCallback(request, env, url) {
     
     const username = 'linuxdo_' + userData.username;
     const sessionId = crypto.randomUUID();
-    await env.IPTV_KV.put('session:' + sessionId, username, { expirationTtl: 604800 });
+    await store(env).put('session:' + sessionId, username, { expirationTtl: 604800 });
     
     return new Response(null, {
       status: 302,
@@ -170,7 +267,7 @@ async function handleNodeLocCallback(request, env, url) {
     
     const username = 'nodeloc_' + rawUsername;
     const sessionId = crypto.randomUUID();
-    await env.IPTV_KV.put('session:' + sessionId, username, { expirationTtl: 604800 });
+    await store(env).put('session:' + sessionId, username, { expirationTtl: 604800 });
     
     return new Response(null, {
       status: 302,
@@ -189,24 +286,24 @@ async function handlePlay(request, env, url) {
   
   if (!token) return new Response('Missing Token', { status: 401 });
 
-  const tokenLimitStr = await env.IPTV_KV.get('token:' + token);
+  const tokenLimitStr = await store(env).get('token:' + token);
   if (!tokenLimitStr) return new Response('Invalid Token or Expired', { status: 403 });
   
   const limit = parseInt(tokenLimitStr);
   const clientIP = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
   
   if (limit > 0) {
-    let ips = await env.IPTV_KV.get('ips:' + token, 'json') || [];
+    let ips = await store(env).get('ips:' + token, 'json') || [];
     if (!ips.includes(clientIP)) {
       if (ips.length >= limit) {
         return new Response('Security Triggered: IP limit exceeded. Please go to dashboard to reset IPs.', { status: 403 });
       }
       ips.push(clientIP);
-      await env.IPTV_KV.put('ips:' + token, JSON.stringify(ips));
+      await store(env).put('ips:' + token, JSON.stringify(ips));
     }
   }
 
-  const channelsStr = await env.IPTV_KV.get('data:channels');
+  const channelsStr = await store(env).get('data:channels');
   if (!channelsStr) return new Response('No Channels Data', { status: 500 });
   
   const channels = JSON.parse(channelsStr);
@@ -227,7 +324,7 @@ async function handlePlay(request, env, url) {
 }
 
 async function updateM3USource(env) {
-  const sourceUrlsStr = await env.IPTV_KV.get('config:source_url');
+  const sourceUrlsStr = await store(env).get('config:source_url');
   if (!sourceUrlsStr) return { success: false, msg: 'No source URL configured' };
 
   const urls = sourceUrlsStr.split(/[\n,]+/).map(u => u.trim()).filter(u => u);
@@ -258,7 +355,7 @@ async function updateM3USource(env) {
   }
 
   if (uniqueChannels.length > 0) {
-    await env.IPTV_KV.put('data:channels', JSON.stringify(uniqueChannels));
+    await store(env).put('data:channels', JSON.stringify(uniqueChannels));
     return { 
       success: true, 
       count: uniqueChannels.length, 
@@ -312,10 +409,10 @@ async function generateUserM3U(request, env, url) {
   const token = url.searchParams.get('token');
   if (!token) return new Response('Missing Token', { status: 401 });
 
-  const isValid = await env.IPTV_KV.get('token:' + token);
+  const isValid = await store(env).get('token:' + token);
   if (!isValid) return new Response('Invalid Token or Expired', { status: 403 });
 
-  const channelsStr = await env.IPTV_KV.get('data:channels');
+  const channelsStr = await store(env).get('data:channels');
   const channels = JSON.parse(channelsStr || '[]');
   const origin = url.origin;
   
@@ -336,20 +433,20 @@ async function handleUserAPI(request, env, url) {
   if (request.method === 'POST' && route === 'register') {
     const body = await request.json();
     if (!body.username || !body.password) return Response.json({ success: false, msg: '缺少账密' });
-    const exists = await env.IPTV_KV.get('user:' + body.username);
+    const exists = await store(env).get('user:' + body.username);
     if (exists) return Response.json({ success: false, msg: '用户名已存在' });
     
-    await env.IPTV_KV.put('user:' + body.username, body.password);
+    await store(env).put('user:' + body.username, body.password);
     return Response.json({ success: true });
   }
 
   if (request.method === 'POST' && route === 'login') {
     const body = await request.json();
-    const storedPass = await env.IPTV_KV.get('user:' + body.username);
+    const storedPass = await store(env).get('user:' + body.username);
     if (!storedPass || storedPass !== body.password) return Response.json({ success: false, msg: '账号或密码错误' });
     
     const sessionId = crypto.randomUUID();
-    await env.IPTV_KV.put('session:' + sessionId, body.username, { expirationTtl: 604800 });
+    await store(env).put('session:' + sessionId, body.username, { expirationTtl: 604800 });
     
     return new Response(JSON.stringify({ success: true }), {
       headers: {
@@ -364,37 +461,37 @@ async function handleUserAPI(request, env, url) {
 
   // === 新增获取系统通知接口 ===
   if (request.method === 'GET' && route === 'announcement') {
-    const announcement = await env.IPTV_KV.get('config:announcement') || '';
+    const announcement = await store(env).get('config:announcement') || '';
     return Response.json({ announcement });
   }
 
   if (request.method === 'POST' && route === 'bind') {
     const body = await request.json();
-    const tokenExists = await env.IPTV_KV.get('token:' + body.token);
+    const tokenExists = await store(env).get('token:' + body.token);
     if (!tokenExists) return Response.json({ success: false, msg: '无效的或已过期的 Token' });
 
-    const owner = await env.IPTV_KV.get('owner:' + body.token);
+    const owner = await store(env).get('owner:' + body.token);
     if (owner && owner !== username) return Response.json({ success: false, msg: '该 Token 已被其他用户绑定' });
     
-    await env.IPTV_KV.put('owner:' + body.token, username);
+    await store(env).put('owner:' + body.token, username);
     
-    let list = await env.IPTV_KV.get('user_tokens:' + username, 'json') || [];
+    let list = await store(env).get('user_tokens:' + username, 'json') || [];
     if (!list.includes(body.token)) {
       list.push(body.token);
-      await env.IPTV_KV.put('user_tokens:' + username, JSON.stringify(list));
+      await store(env).put('user_tokens:' + username, JSON.stringify(list));
     }
     return Response.json({ success: true });
   }
 
   if (request.method === 'GET' && route === 'tokens') {
-    let list = await env.IPTV_KV.get('user_tokens:' + username, 'json') || [];
+    let list = await store(env).get('user_tokens:' + username, 'json') || [];
     let result = [];
     for (let t of list) {
-      const limitStr = await env.IPTV_KV.get('token:' + t);
+      const limitStr = await store(env).get('token:' + t);
       if (limitStr) {
-        const ips = await env.IPTV_KV.get('ips:' + t, 'json') || [];
+        const ips = await store(env).get('ips:' + t, 'json') || [];
         
-        const keyList = await env.IPTV_KV.list({ prefix: 'token:' + t });
+        const keyList = await store(env).list({ prefix: 'token:' + t });
         const keyInfo = keyList.keys.find(k => k.name === 'token:' + t);
         let expireText = '永久有效';
         if (keyInfo && keyInfo.expiration) {
@@ -410,17 +507,17 @@ async function handleUserAPI(request, env, url) {
 
   if (request.method === 'POST' && route === 'reset_ip') {
     const body = await request.json();
-    const owner = await env.IPTV_KV.get('owner:' + body.token);
+    const owner = await store(env).get('owner:' + body.token);
     if (owner !== username) return Response.json({ success: false, msg: '无权操作' });
     
-    await env.IPTV_KV.put('ips:' + body.token, '[]');
+    await store(env).put('ips:' + body.token, '[]');
     return Response.json({ success: true });
   }
 
   if (request.method === 'POST' && route === 'logout') {
     const cookieHeader = request.headers.get('Cookie') || '';
     const match = cookieHeader.match(/session_id=([^;]+)/);
-    if (match) await env.IPTV_KV.delete('session:' + match[1]);
+    if (match) await store(env).delete('session:' + match[1]);
     
     return new Response(JSON.stringify({ success: true }), {
       headers: {
@@ -445,8 +542,8 @@ async function checkAuth(request, env) {
   const decoded = atob(encoded);
   const [user, pass] = decoded.split(':');
   
-  const expectedUser = await env.IPTV_KV.get('config:admin_user') || env.DEFAULT_ADMIN_USER || 'admin';
-  const expectedPass = await env.IPTV_KV.get('config:admin_pass') || env.DEFAULT_ADMIN_PASS || 'admin123';
+  const expectedUser = await store(env).get('config:admin_user') || env.DEFAULT_ADMIN_USER || 'admin';
+  const expectedPass = await store(env).get('config:admin_pass') || env.DEFAULT_ADMIN_PASS || 'admin123';
   
   return user === expectedUser && pass === expectedPass;
 }
@@ -455,10 +552,10 @@ async function handleAdminAPI(request, env, url) {
   const route = url.pathname.replace('/admin/api/', '');
   
   if (request.method === 'GET' && route === 'status') {
-    const sourceUrl = await env.IPTV_KV.get('config:source_url') || '';
+    const sourceUrl = await store(env).get('config:source_url') || '';
     // 获取当前通知
-    const announcement = await env.IPTV_KV.get('config:announcement') || '';
-    const channels = JSON.parse(await env.IPTV_KV.get('data:channels') || '[]');
+    const announcement = await store(env).get('config:announcement') || '';
+    const channels = JSON.parse(await store(env).get('data:channels') || '[]');
     return Response.json({ sourceUrl, announcement, channelCount: channels.length });
   }
   
@@ -469,24 +566,24 @@ async function handleAdminAPI(request, env, url) {
 
   if (request.method === 'POST' && route === 'config') {
     const body = await request.json();
-    await env.IPTV_KV.put('config:source_url', body.sourceUrl);
+    await store(env).put('config:source_url', body.sourceUrl);
     return Response.json({ success: true });
   }
 
   // === 新增保存通知接口 ===
   if (request.method === 'POST' && route === 'announcement') {
     const body = await request.json();
-    await env.IPTV_KV.put('config:announcement', body.announcement || '');
+    await store(env).put('config:announcement', body.announcement || '');
     return Response.json({ success: true });
   }
 
   if (request.method === 'GET' && route === 'tokens') {
-    const list = await env.IPTV_KV.list({ prefix: 'token:' });
+    const list = await store(env).list({ prefix: 'token:' });
     const tokens = await Promise.all(list.keys.map(async k => {
       const t = k.name.replace('token:', '');
-      const limit = await env.IPTV_KV.get(k.name);
-      const ips = await env.IPTV_KV.get('ips:' + t, 'json') || [];
-      const owner = await env.IPTV_KV.get('owner:' + t) || '未绑定';
+      const limit = await store(env).get(k.name);
+      const ips = await store(env).get('ips:' + t, 'json') || [];
+      const owner = await store(env).get('owner:' + t) || '未绑定';
       
       let expireText = '永久有效';
       if (k.expiration) {
@@ -506,21 +603,21 @@ async function handleAdminAPI(request, env, url) {
        options.expirationTtl = Math.max(60, Number(body.expireHours) * 3600);
     }
     const limitVal = body.limit === '' ? '0' : body.limit.toString();
-    await env.IPTV_KV.put('token:' + body.token, limitVal, options);
+    await store(env).put('token:' + body.token, limitVal, options);
     return Response.json({ success: true });
   }
 
   if (request.method === 'DELETE' && route === 'token') {
     const body = await request.json();
-    await env.IPTV_KV.delete('token:' + body.token);
-    await env.IPTV_KV.delete('ips:' + body.token);
-    await env.IPTV_KV.delete('owner:' + body.token);
+    await store(env).delete('token:' + body.token);
+    await store(env).delete('ips:' + body.token);
+    await store(env).delete('owner:' + body.token);
     return Response.json({ success: true });
   }
 
   if (request.method === 'POST' && route === 'reset_ip') {
     const body = await request.json();
-    await env.IPTV_KV.put('ips:' + body.token, '[]');
+    await store(env).put('ips:' + body.token, '[]');
     return Response.json({ success: true });
   }
 
