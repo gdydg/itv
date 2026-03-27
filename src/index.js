@@ -56,32 +56,32 @@ export default {
   }
 };
 
-const STORE_CACHE = new WeakMap();
+const DB_STORE_CACHE = new WeakMap();
 
-function store(env) {
-  const cached = STORE_CACHE.get(env);
+function dbStore(env) {
+  const cached = DB_STORE_CACHE.get(env);
   if (cached) return cached;
 
   if (!env.IPTV_DB) {
     throw new Error('Missing D1 binding: IPTV_DB');
   }
 
-  const d1Store = createD1KVStore(env.IPTV_DB);
-  STORE_CACHE.set(env, d1Store);
+  const d1Store = createD1Store(env.IPTV_DB);
+  DB_STORE_CACHE.set(env, d1Store);
   return d1Store;
 }
 
-function createD1KVStore(db) {
+function createD1Store(db) {
   let initialized = false;
 
   async function ensureInit() {
     if (initialized) return;
 
     await db
-      .prepare('CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL, expiration INTEGER)')
+      .prepare('CREATE TABLE IF NOT EXISTS app_store (key TEXT PRIMARY KEY, value TEXT NOT NULL, expiration INTEGER)')
       .run();
     await db
-      .prepare('CREATE INDEX IF NOT EXISTS idx_kv_store_expiration ON kv_store(expiration)')
+      .prepare('CREATE INDEX IF NOT EXISTS idx_app_store_expiration ON app_store(expiration)')
       .run();
 
     initialized = true;
@@ -89,13 +89,13 @@ function createD1KVStore(db) {
 
   async function purgeExpired() {
     await ensureInit();
-    await db.prepare('DELETE FROM kv_store WHERE expiration IS NOT NULL AND expiration <= unixepoch()').run();
+    await db.prepare('DELETE FROM app_store WHERE expiration IS NOT NULL AND expiration <= unixepoch()').run();
   }
 
   return {
     async get(key, type) {
       await purgeExpired();
-      const row = await db.prepare('SELECT value FROM kv_store WHERE key = ?').bind(key).first();
+      const row = await db.prepare('SELECT value FROM app_store WHERE key = ?').bind(key).first();
       if (!row) return null;
       if (type === 'json') {
         try {
@@ -120,7 +120,7 @@ function createD1KVStore(db) {
       const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
       await db
         .prepare(`
-          INSERT INTO kv_store(key, value, expiration)
+          INSERT INTO app_store(key, value, expiration)
           VALUES (?, ?, ?)
           ON CONFLICT(key) DO UPDATE SET
             value = excluded.value,
@@ -132,14 +132,14 @@ function createD1KVStore(db) {
 
     async delete(key) {
       await ensureInit();
-      await db.prepare('DELETE FROM kv_store WHERE key = ?').bind(key).run();
+      await db.prepare('DELETE FROM app_store WHERE key = ?').bind(key).run();
     },
 
     async list(options = {}) {
       await purgeExpired();
       const prefix = options.prefix || '';
       const rows = await db
-        .prepare('SELECT key, expiration FROM kv_store WHERE key LIKE ? ORDER BY key')
+        .prepare('SELECT key, expiration FROM app_store WHERE key LIKE ? ORDER BY key')
         .bind(prefix + '%')
         .all();
 
@@ -160,7 +160,7 @@ async function getUserSession(request, env) {
   const match = cookieHeader.match(/session_id=([^;]+)/);
   if (!match) return null;
   const sessionId = match[1];
-  return await store(env).get('session:' + sessionId);
+  return await dbStore(env).get('session:' + sessionId);
 }
 
 // ================= Linux DO OAuth2 逻辑 =================
@@ -205,7 +205,7 @@ async function handleLinuxDoCallback(request, env, url) {
     
     const username = 'linuxdo_' + userData.username;
     const sessionId = crypto.randomUUID();
-    await store(env).put('session:' + sessionId, username, { expirationTtl: 604800 });
+    await dbStore(env).put('session:' + sessionId, username, { expirationTtl: 604800 });
     
     return new Response(null, {
       status: 302,
@@ -267,7 +267,7 @@ async function handleNodeLocCallback(request, env, url) {
     
     const username = 'nodeloc_' + rawUsername;
     const sessionId = crypto.randomUUID();
-    await store(env).put('session:' + sessionId, username, { expirationTtl: 604800 });
+    await dbStore(env).put('session:' + sessionId, username, { expirationTtl: 604800 });
     
     return new Response(null, {
       status: 302,
@@ -286,24 +286,24 @@ async function handlePlay(request, env, url) {
   
   if (!token) return new Response('Missing Token', { status: 401 });
 
-  const tokenLimitStr = await store(env).get('token:' + token);
+  const tokenLimitStr = await dbStore(env).get('token:' + token);
   if (!tokenLimitStr) return new Response('Invalid Token or Expired', { status: 403 });
   
   const limit = parseInt(tokenLimitStr);
   const clientIP = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
   
   if (limit > 0) {
-    let ips = await store(env).get('ips:' + token, 'json') || [];
+    let ips = await dbStore(env).get('ips:' + token, 'json') || [];
     if (!ips.includes(clientIP)) {
       if (ips.length >= limit) {
         return new Response('Security Triggered: IP limit exceeded. Please go to dashboard to reset IPs.', { status: 403 });
       }
       ips.push(clientIP);
-      await store(env).put('ips:' + token, JSON.stringify(ips));
+      await dbStore(env).put('ips:' + token, JSON.stringify(ips));
     }
   }
 
-  const channelsStr = await store(env).get('data:channels');
+  const channelsStr = await dbStore(env).get('data:channels');
   if (!channelsStr) return new Response('No Channels Data', { status: 500 });
   
   const channels = JSON.parse(channelsStr);
@@ -324,7 +324,7 @@ async function handlePlay(request, env, url) {
 }
 
 async function updateM3USource(env) {
-  const sourceUrlsStr = await store(env).get('config:source_url');
+  const sourceUrlsStr = await dbStore(env).get('config:source_url');
   if (!sourceUrlsStr) return { success: false, msg: 'No source URL configured' };
 
   const urls = sourceUrlsStr.split(/[\n,]+/).map(u => u.trim()).filter(u => u);
@@ -355,7 +355,7 @@ async function updateM3USource(env) {
   }
 
   if (uniqueChannels.length > 0) {
-    await store(env).put('data:channels', JSON.stringify(uniqueChannels));
+    await dbStore(env).put('data:channels', JSON.stringify(uniqueChannels));
     return { 
       success: true, 
       count: uniqueChannels.length, 
@@ -409,10 +409,10 @@ async function generateUserM3U(request, env, url) {
   const token = url.searchParams.get('token');
   if (!token) return new Response('Missing Token', { status: 401 });
 
-  const isValid = await store(env).get('token:' + token);
+  const isValid = await dbStore(env).get('token:' + token);
   if (!isValid) return new Response('Invalid Token or Expired', { status: 403 });
 
-  const channelsStr = await store(env).get('data:channels');
+  const channelsStr = await dbStore(env).get('data:channels');
   const channels = JSON.parse(channelsStr || '[]');
   const origin = url.origin;
   
@@ -433,20 +433,20 @@ async function handleUserAPI(request, env, url) {
   if (request.method === 'POST' && route === 'register') {
     const body = await request.json();
     if (!body.username || !body.password) return Response.json({ success: false, msg: '缺少账密' });
-    const exists = await store(env).get('user:' + body.username);
+    const exists = await dbStore(env).get('user:' + body.username);
     if (exists) return Response.json({ success: false, msg: '用户名已存在' });
     
-    await store(env).put('user:' + body.username, body.password);
+    await dbStore(env).put('user:' + body.username, body.password);
     return Response.json({ success: true });
   }
 
   if (request.method === 'POST' && route === 'login') {
     const body = await request.json();
-    const storedPass = await store(env).get('user:' + body.username);
+    const storedPass = await dbStore(env).get('user:' + body.username);
     if (!storedPass || storedPass !== body.password) return Response.json({ success: false, msg: '账号或密码错误' });
     
     const sessionId = crypto.randomUUID();
-    await store(env).put('session:' + sessionId, body.username, { expirationTtl: 604800 });
+    await dbStore(env).put('session:' + sessionId, body.username, { expirationTtl: 604800 });
     
     return new Response(JSON.stringify({ success: true }), {
       headers: {
@@ -461,37 +461,37 @@ async function handleUserAPI(request, env, url) {
 
   // === 新增获取系统通知接口 ===
   if (request.method === 'GET' && route === 'announcement') {
-    const announcement = await store(env).get('config:announcement') || '';
+    const announcement = await dbStore(env).get('config:announcement') || '';
     return Response.json({ announcement });
   }
 
   if (request.method === 'POST' && route === 'bind') {
     const body = await request.json();
-    const tokenExists = await store(env).get('token:' + body.token);
+    const tokenExists = await dbStore(env).get('token:' + body.token);
     if (!tokenExists) return Response.json({ success: false, msg: '无效的或已过期的 Token' });
 
-    const owner = await store(env).get('owner:' + body.token);
+    const owner = await dbStore(env).get('owner:' + body.token);
     if (owner && owner !== username) return Response.json({ success: false, msg: '该 Token 已被其他用户绑定' });
     
-    await store(env).put('owner:' + body.token, username);
+    await dbStore(env).put('owner:' + body.token, username);
     
-    let list = await store(env).get('user_tokens:' + username, 'json') || [];
+    let list = await dbStore(env).get('user_tokens:' + username, 'json') || [];
     if (!list.includes(body.token)) {
       list.push(body.token);
-      await store(env).put('user_tokens:' + username, JSON.stringify(list));
+      await dbStore(env).put('user_tokens:' + username, JSON.stringify(list));
     }
     return Response.json({ success: true });
   }
 
   if (request.method === 'GET' && route === 'tokens') {
-    let list = await store(env).get('user_tokens:' + username, 'json') || [];
+    let list = await dbStore(env).get('user_tokens:' + username, 'json') || [];
     let result = [];
     for (let t of list) {
-      const limitStr = await store(env).get('token:' + t);
+      const limitStr = await dbStore(env).get('token:' + t);
       if (limitStr) {
-        const ips = await store(env).get('ips:' + t, 'json') || [];
+        const ips = await dbStore(env).get('ips:' + t, 'json') || [];
         
-        const keyList = await store(env).list({ prefix: 'token:' + t });
+        const keyList = await dbStore(env).list({ prefix: 'token:' + t });
         const keyInfo = keyList.keys.find(k => k.name === 'token:' + t);
         let expireText = '永久有效';
         if (keyInfo && keyInfo.expiration) {
@@ -507,17 +507,17 @@ async function handleUserAPI(request, env, url) {
 
   if (request.method === 'POST' && route === 'reset_ip') {
     const body = await request.json();
-    const owner = await store(env).get('owner:' + body.token);
+    const owner = await dbStore(env).get('owner:' + body.token);
     if (owner !== username) return Response.json({ success: false, msg: '无权操作' });
     
-    await store(env).put('ips:' + body.token, '[]');
+    await dbStore(env).put('ips:' + body.token, '[]');
     return Response.json({ success: true });
   }
 
   if (request.method === 'POST' && route === 'logout') {
     const cookieHeader = request.headers.get('Cookie') || '';
     const match = cookieHeader.match(/session_id=([^;]+)/);
-    if (match) await store(env).delete('session:' + match[1]);
+    if (match) await dbStore(env).delete('session:' + match[1]);
     
     return new Response(JSON.stringify({ success: true }), {
       headers: {
@@ -542,8 +542,8 @@ async function checkAuth(request, env) {
   const decoded = atob(encoded);
   const [user, pass] = decoded.split(':');
   
-  const expectedUser = await store(env).get('config:admin_user') || env.DEFAULT_ADMIN_USER || 'admin';
-  const expectedPass = await store(env).get('config:admin_pass') || env.DEFAULT_ADMIN_PASS || 'admin123';
+  const expectedUser = await dbStore(env).get('config:admin_user') || env.DEFAULT_ADMIN_USER || 'admin';
+  const expectedPass = await dbStore(env).get('config:admin_pass') || env.DEFAULT_ADMIN_PASS || 'admin123';
   
   return user === expectedUser && pass === expectedPass;
 }
@@ -552,10 +552,10 @@ async function handleAdminAPI(request, env, url) {
   const route = url.pathname.replace('/admin/api/', '');
   
   if (request.method === 'GET' && route === 'status') {
-    const sourceUrl = await store(env).get('config:source_url') || '';
+    const sourceUrl = await dbStore(env).get('config:source_url') || '';
     // 获取当前通知
-    const announcement = await store(env).get('config:announcement') || '';
-    const channels = JSON.parse(await store(env).get('data:channels') || '[]');
+    const announcement = await dbStore(env).get('config:announcement') || '';
+    const channels = JSON.parse(await dbStore(env).get('data:channels') || '[]');
     return Response.json({ sourceUrl, announcement, channelCount: channels.length });
   }
   
@@ -566,24 +566,24 @@ async function handleAdminAPI(request, env, url) {
 
   if (request.method === 'POST' && route === 'config') {
     const body = await request.json();
-    await store(env).put('config:source_url', body.sourceUrl);
+    await dbStore(env).put('config:source_url', body.sourceUrl);
     return Response.json({ success: true });
   }
 
   // === 新增保存通知接口 ===
   if (request.method === 'POST' && route === 'announcement') {
     const body = await request.json();
-    await store(env).put('config:announcement', body.announcement || '');
+    await dbStore(env).put('config:announcement', body.announcement || '');
     return Response.json({ success: true });
   }
 
   if (request.method === 'GET' && route === 'tokens') {
-    const list = await store(env).list({ prefix: 'token:' });
+    const list = await dbStore(env).list({ prefix: 'token:' });
     const tokens = await Promise.all(list.keys.map(async k => {
       const t = k.name.replace('token:', '');
-      const limit = await store(env).get(k.name);
-      const ips = await store(env).get('ips:' + t, 'json') || [];
-      const owner = await store(env).get('owner:' + t) || '未绑定';
+      const limit = await dbStore(env).get(k.name);
+      const ips = await dbStore(env).get('ips:' + t, 'json') || [];
+      const owner = await dbStore(env).get('owner:' + t) || '未绑定';
       
       let expireText = '永久有效';
       if (k.expiration) {
@@ -603,21 +603,21 @@ async function handleAdminAPI(request, env, url) {
        options.expirationTtl = Math.max(60, Number(body.expireHours) * 3600);
     }
     const limitVal = body.limit === '' ? '0' : body.limit.toString();
-    await store(env).put('token:' + body.token, limitVal, options);
+    await dbStore(env).put('token:' + body.token, limitVal, options);
     return Response.json({ success: true });
   }
 
   if (request.method === 'DELETE' && route === 'token') {
     const body = await request.json();
-    await store(env).delete('token:' + body.token);
-    await store(env).delete('ips:' + body.token);
-    await store(env).delete('owner:' + body.token);
+    await dbStore(env).delete('token:' + body.token);
+    await dbStore(env).delete('ips:' + body.token);
+    await dbStore(env).delete('owner:' + body.token);
     return Response.json({ success: true });
   }
 
   if (request.method === 'POST' && route === 'reset_ip') {
     const body = await request.json();
-    await store(env).put('ips:' + body.token, '[]');
+    await dbStore(env).put('ips:' + body.token, '[]');
     return Response.json({ success: true });
   }
 
