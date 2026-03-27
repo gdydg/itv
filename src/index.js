@@ -76,14 +76,14 @@ function createD1KVStore(db) {
 
   async function ensureInit() {
     if (initialized) return;
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS kv_store (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
-        expiration INTEGER
-      );
-      CREATE INDEX IF NOT EXISTS idx_kv_store_expiration ON kv_store(expiration);
-    `);
+
+    await db
+      .prepare('CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL, expiration INTEGER)')
+      .run();
+    await db
+      .prepare('CREATE INDEX IF NOT EXISTS idx_kv_store_expiration ON kv_store(expiration)')
+      .run();
+
     initialized = true;
   }
 
