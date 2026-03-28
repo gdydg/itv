@@ -423,14 +423,19 @@ async function generateUserSubscription(request, env, url, format = 'm3u') {
   const channelsStr = await dbStore(env).get('data:channels');
   const channels = JSON.parse(channelsStr || '[]');
   const origin = url.origin;
+  const txtSubscriptionUrl = origin + '/sub/txt?token=' + token;
 
   if (format === 'tvbox') {
-    const tvbox = channels.map(c => ({
-      name: c.name,
-      url: origin + '/play/' + c.id + '?token=' + token,
-      group: c.group || 'Default',
-      logo: c.logo || ''
-    }));
+    const tvbox = {
+      lives: [
+        {
+          name: '自建专属 IPTV',
+          type: 0,
+          url: txtSubscriptionUrl,
+          epg: ''
+        }
+      ]
+    };
     return Response.json(tvbox);
   }
 
