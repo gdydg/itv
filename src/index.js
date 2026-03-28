@@ -440,7 +440,23 @@ async function generateUserSubscription(request, env, url, format = 'm3u') {
   }
 
   if (format === 'txt') {
-    const txt = channels.map(c => c.name + ',' + origin + '/play/' + c.id + '?token=' + token).join('\n');
+    const groupedChannels = new Map();
+    channels.forEach((c) => {
+      const groupName = c.group || 'Default';
+      if (!groupedChannels.has(groupName)) groupedChannels.set(groupName, []);
+      groupedChannels.get(groupName).push(c);
+    });
+
+    const txtLines = [];
+    for (const [groupName, groupItems] of groupedChannels) {
+      txtLines.push(groupName + ',#genre#');
+      groupItems.forEach((c) => {
+        txtLines.push(c.name + ',' + origin + '/play/' + c.id + '?token=' + token);
+      });
+      txtLines.push('');
+    }
+
+    const txt = txtLines.join('\n').trim();
     return new Response(txt, { headers: { 'Content-Type': 'text/plain;charset=UTF-8' } });
   }
 
