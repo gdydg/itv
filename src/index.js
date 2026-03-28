@@ -10,7 +10,15 @@ export default {
 
     // --- 2. 获取订阅 ---
     if (path === '/sub') {
-      return await generateUserM3U(request, env, url);
+      return await generateUserSubscription(request, env, url, 'm3u');
+    }
+
+    if (path === '/sub/tvbox') {
+      return await generateUserSubscription(request, env, url, 'tvbox');
+    }
+
+    if (path === '/sub/txt') {
+      return await generateUserSubscription(request, env, url, 'txt');
     }
 
     // --- 3. 后台管理 API ---
@@ -405,7 +413,7 @@ function parseM3U(content) {
   return channels;
 }
 
-async function generateUserM3U(request, env, url) {
+async function generateUserSubscription(request, env, url, format = 'm3u') {
   const token = url.searchParams.get('token');
   if (!token) return new Response('Missing Token', { status: 401 });
 
@@ -415,7 +423,27 @@ async function generateUserM3U(request, env, url) {
   const channelsStr = await dbStore(env).get('data:channels');
   const channels = JSON.parse(channelsStr || '[]');
   const origin = url.origin;
-  
+  const txtSubscriptionUrl = origin + '/sub/txt?token=' + token;
+
+  if (format === 'tvbox') {
+    const tvbox = {
+      lives: [
+        {
+          name: '自建专属 IPTV',
+          type: 0,
+          url: txtSubscriptionUrl,
+          epg: ''
+        }
+      ]
+    };
+    return Response.json(tvbox);
+  }
+
+  if (format === 'txt') {
+    const txt = channels.map(c => c.name + ',' + origin + '/play/' + c.id + '?token=' + token).join('\n');
+    return new Response(txt, { headers: { 'Content-Type': 'text/plain;charset=UTF-8' } });
+  }
+
   let m3u = '#EXTM3U\n';
   channels.forEach(c => {
     m3u += '#EXTINF:-1 tvg-logo="' + c.logo + '" group-title="' + c.group + '",' + c.name + '\n';
@@ -732,7 +760,7 @@ function renderUserDashboard(username) {
   '          <th>Token</th>\n' +
   '          <th>状态/限制</th>\n' +
   '          <th>过期时间</th>\n' +
-  '          <th>M3U 订阅链接</th>\n' +
+  '          <th>订阅接口</th>\n' +
   '          <th>操作</th>\n' +
   '        </tr></thead>\n' +
   '        <tbody id="list"></tbody>\n' +
@@ -758,12 +786,14 @@ function renderUserDashboard(username) {
   '      for(let i=0; i<data.length; i++) {\n' +
   '        let t = data[i];\n' +
   '        let limitTxt = t.limit === 0 ? \'无限 IP\' : (t.used + \' / \' + t.limit + \' IP\');\n' +
-  '        let subLink = window.location.origin + \'/sub?token=\' + t.token;\n' +
+  '        let m3uLink = window.location.origin + \'/sub?token=\' + t.token;\n' +
+  '        let tvboxLink = window.location.origin + \'/sub/tvbox?token=\' + t.token;\n' +
+  '        let txtLink = window.location.origin + \'/sub/txt?token=\' + t.token;\n' +
   '        html += \'<tr>\' +\n' +
   '          \'<td>\' + t.token + \'</td>\' +\n' +
   '          \'<td>\' + limitTxt + \'</td>\' +\n' +
   '          \'<td>\' + t.expireText + \'</td>\' +\n' +
-  '          \'<td><button onclick="copy(\\\'\' + subLink + \'\\\')">复制链接</button></td>\' +\n' +
+  '          \'<td style="display:flex; gap:6px; flex-wrap:wrap;"><button onclick="copy(\\\'\' + m3uLink + \'\\\')">M3U</button><button onclick="copy(\\\'\' + tvboxLink + \'\\\')">TVBox</button><button onclick="copy(\\\'\' + txtLink + \'\\\')">TXT</button></td>\' +\n' +
   '          \'<td><button class="warning" onclick="resetIp(\\\'\' + t.token + \'\\\')">解除封锁</button></td>\' +\n' +
   '        \'</tr>\';\n' +
   '      }\n' +
