@@ -87,16 +87,21 @@ function createRedisStore(redisConfig) {
 
   async function command(args) {
     const baseUrl = redisConfig.url.replace(/\/$/, '');
-    const path = args.map((arg) => encodeURIComponent(String(arg))).join('/');
-    const res = await fetch(baseUrl + '/' + path, {
+    const res = await fetch(baseUrl, {
+      method: 'POST',
       headers: {
-        Authorization: 'Bearer ' + redisConfig.token
-      }
+        Authorization: 'Bearer ' + redisConfig.token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(args)
     });
     if (!res.ok) {
       throw new Error('Upstash command failed: ' + res.status);
     }
     const data = await res.json();
+    if (data.error) {
+      throw new Error('Upstash command error: ' + data.error);
+    }
     return data.result;
   }
 

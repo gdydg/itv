@@ -47,12 +47,30 @@ docker run -d --name m3ugc \
   -e UPSTASH_REDIS_REST_TOKEN="<your-token>" \
   -e DEFAULT_ADMIN_USER="admin" \
   -e DEFAULT_ADMIN_PASS="admin123" \
+  -e LINUXDO_CLIENT_ID="<optional>" \
+  -e LINUXDO_CLIENT_SECRET="<optional>" \
+  -e NODELOC_CLIENT_ID="<optional>" \
+  -e NODELOC_CLIENT_SECRET="<optional>" \
   m3ugc:local
 ```
 
 访问：
 - 用户面板：`http://localhost:8787/`
 - 管理后台：`http://localhost:8787/admin`
+
+### 3) 两个 OAuth 授权登录（可选）
+
+项目内的 **Linux DO** 与 **NodeLoc** 授权登录逻辑仍保留，配置对应环境变量后即可启用：
+
+- `LINUXDO_CLIENT_ID`
+- `LINUXDO_CLIENT_SECRET`
+- `NODELOC_CLIENT_ID`
+- `NODELOC_CLIENT_SECRET`
+
+对应回调地址：
+
+- `http://<你的域名>/api/auth/linuxdo/callback`
+- `http://<你的域名>/api/auth/nodeloc/callback`
 
 ---
 
