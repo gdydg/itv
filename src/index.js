@@ -70,55 +70,64 @@ function dbStore(env) {
   const cached = DB_STORE_CACHE.get(env);
   if (cached) return cached;
 
-  if (!env.IPTV_DB) {
-    throw new Error('Missing D1 binding: IPTV_DB');
+  if (!env.UPSTASH_REDIS_REST_URL || !env.UPSTASH_REDIS_REST_TOKEN) {
+    throw new Error('Missing Upstash Redis env: UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN');
   }
 
-  const d1Store = createD1Store(env.IPTV_DB);
-  DB_STORE_CACHE.set(env, d1Store);
-  return d1Store;
+  const redisStore = createRedisStore({
+    url: env.UPSTASH_REDIS_REST_URL,
+    token: env.UPSTASH_REDIS_REST_TOKEN
+  });
+  DB_STORE_CACHE.set(env, redisStore);
+  return redisStore;
 }
 
-function createD1Store(db) {
-  let initialized = false;
+function createRedisStore(redisConfig) {
+  const META_PREFIX = '__meta:exp:';
 
-  async function ensureInit() {
-    if (initialized) return;
-
-    await db
-      .prepare('CREATE TABLE IF NOT EXISTS app_store (key TEXT PRIMARY KEY, value TEXT NOT NULL, expiration INTEGER)')
-      .run();
-    await db
-      .prepare('CREATE INDEX IF NOT EXISTS idx_app_store_expiration ON app_store(expiration)')
-      .run();
-
-    initialized = true;
+  async function command(args) {
+    const baseUrl = redisConfig.url.replace(/\/$/, '');
+    const path = args.map((arg) => encodeURIComponent(String(arg))).join('/');
+    const res = await fetch(baseUrl + '/' + path, {
+      headers: {
+        Authorization: 'Bearer ' + redisConfig.token
+      }
+    });
+    if (!res.ok) {
+      throw new Error('Upstash command failed: ' + res.status);
+    }
+    const data = await res.json();
+    return data.result;
   }
 
-  async function purgeExpired() {
-    await ensureInit();
-    await db.prepare('DELETE FROM app_store WHERE expiration IS NOT NULL AND expiration <= unixepoch()').run();
+  async function scanKeys(pattern) {
+    const keys = [];
+    let cursor = '0';
+    do {
+      const result = await command(['SCAN', cursor, 'MATCH', pattern, 'COUNT', 200]);
+      cursor = String(result[0]);
+      keys.push(...result[1]);
+    } while (cursor !== '0');
+    return keys;
   }
 
   return {
     async get(key, type) {
-      await purgeExpired();
-      const row = await db.prepare('SELECT value FROM app_store WHERE key = ?').bind(key).first();
-      if (!row) return null;
+      const raw = await command(['GET', key]);
+      if (raw === null || raw === undefined) return null;
       if (type === 'json') {
         try {
-          return JSON.parse(row.value);
+          return typeof raw === 'string' ? JSON.parse(raw) : raw;
         } catch (_) {
           return null;
         }
       }
-      return row.value;
+      return typeof raw === 'string' ? raw : JSON.stringify(raw);
     },
 
     async put(key, value, options = {}) {
-      await ensureInit();
       const now = Math.floor(Date.now() / 1000);
-      let expiration = null;
+      let expiration = undefined;
       if (options.expirationTtl) {
         expiration = now + Number(options.expirationTtl);
       } else if (options.expiration) {
@@ -126,35 +135,32 @@ function createD1Store(db) {
       }
 
       const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
-      await db
-        .prepare(`
-          INSERT INTO app_store(key, value, expiration)
-          VALUES (?, ?, ?)
-          ON CONFLICT(key) DO UPDATE SET
-            value = excluded.value,
-            expiration = excluded.expiration
-        `)
-        .bind(key, stringValue, expiration)
-        .run();
+      if (expiration && expiration > now) {
+        await command(['SET', key, stringValue, 'EXAT', expiration]);
+        await command(['SET', META_PREFIX + key, String(expiration), 'EXAT', expiration]);
+      } else {
+        await command(['SET', key, stringValue]);
+        await command(['DEL', META_PREFIX + key]);
+      }
     },
 
     async delete(key) {
-      await ensureInit();
-      await db.prepare('DELETE FROM app_store WHERE key = ?').bind(key).run();
+      await command(['DEL', key]);
+      await command(['DEL', META_PREFIX + key]);
     },
 
     async list(options = {}) {
-      await purgeExpired();
       const prefix = options.prefix || '';
-      const rows = await db
-        .prepare('SELECT key, expiration FROM app_store WHERE key LIKE ? ORDER BY key')
-        .bind(prefix + '%')
-        .all();
+      const keys = await scanKeys(prefix + '*');
+      const sortedKeys = keys.sort();
 
       return {
-        keys: (rows.results || []).map((r) => ({
-          name: r.key,
-          expiration: r.expiration || undefined
+        keys: await Promise.all(sortedKeys.map(async (name) => {
+          const expiration = await command(['GET', META_PREFIX + name]);
+          return {
+            name,
+            expiration: expiration ? Number(expiration) : undefined
+          };
         }))
       };
     }
