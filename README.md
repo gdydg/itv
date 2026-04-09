@@ -72,6 +72,21 @@ docker run -d --name m3ugc \
 - `http://<你的域名>/api/auth/linuxdo/callback`
 - `http://<你的域名>/api/auth/nodeloc/callback`
 
+### 4) 外部 Cloudflare Workers Cron 定时抓取
+
+已移除运行时内置 `scheduled` 触发，改为显式 HTTP 触发，便于你用外部 Cloudflare Workers Cron 调用。
+
+请配置环境变量：
+
+- `CRON_SECRET`
+
+触发地址（GET/POST 都可）：
+
+- `http://<你的域名>/api/cron/sync?key=<CRON_SECRET>`
+- 或请求头带：`x-cron-key: <CRON_SECRET>` 调用 `http://<你的域名>/api/cron/sync`
+
+返回 JSON 即同步结果（同管理后台“立即抓取”逻辑）。
+
 ---
 
 ## 📦 GHCR 自动构建

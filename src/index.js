@@ -21,6 +21,11 @@ export default {
       return await generateUserSubscription(request, env, url, 'txt');
     }
 
+    // --- 2.5 外部 Cron 同步接口 ---
+    if (path === '/api/cron/sync') {
+      return await handleExternalCronSync(request, env, url);
+    }
+
     // --- 3. 后台管理 API ---
     if (path.startsWith('/admin/api/')) {
       if (!await checkAuth(request, env)) return new Response('Unauthorized', { status: 401, headers: { 'WWW-Authenticate': 'Basic' } });
@@ -57,10 +62,6 @@ export default {
     }
 
     return new Response('Not Found', { status: 404 });
-  },
-
-  async scheduled(event, env, ctx) {
-    await updateM3USource(env);
   }
 };
 
@@ -180,6 +181,20 @@ async function getUserSession(request, env) {
   if (!match) return null;
   const sessionId = match[1];
   return await dbStore(env).get('session:' + sessionId);
+}
+
+async function handleExternalCronSync(request, env, url) {
+  if (!env.CRON_SECRET) {
+    return Response.json({ success: false, msg: 'CRON_SECRET 未配置' }, { status: 500 });
+  }
+
+  const key = url.searchParams.get('key') || request.headers.get('x-cron-key') || '';
+  if (key !== env.CRON_SECRET) {
+    return Response.json({ success: false, msg: 'Unauthorized' }, { status: 401 });
+  }
+
+  const result = await updateM3USource(env);
+  return Response.json(result, { status: result.success ? 200 : 500 });
 }
 
 // ================= Linux DO OAuth2 逻辑 =================

@@ -13,4 +13,5 @@ services:
       LINUXDO_CLIENT_SECRET: ${LINUXDO_CLIENT_SECRET:-}
       NODELOC_CLIENT_ID: ${NODELOC_CLIENT_ID:-}
       NODELOC_CLIENT_SECRET: ${NODELOC_CLIENT_SECRET:-}
+      CRON_SECRET: ${CRON_SECRET:-change-me}
     restart: unless-stopped
