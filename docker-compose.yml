@@ -1,0 +1,12 @@
+services:
+  m3ugc:
+    build: .
+    image: ghcr.io/your-org/itv:latest
+    ports:
+      - "8787:8787"
+    environment:
+      UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL}
+      UPSTASH_REDIS_REST_TOKEN: ${UPSTASH_REDIS_REST_TOKEN}
+      DEFAULT_ADMIN_USER: ${DEFAULT_ADMIN_USER:-admin}
+      DEFAULT_ADMIN_PASS: ${DEFAULT_ADMIN_PASS:-admin123}
+    restart: unless-stopped
