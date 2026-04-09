@@ -100,11 +100,13 @@ npm install
 npm run dev
 ```
 
-容器启动命令（生产部署使用）：
+容器/Render 启动命令（生产部署使用）：
 
 ```bash
 npm run start
 ```
+
+> `npm run start` 现在是 Node HTTP Server（`src/server.js`），不依赖 `wrangler dev`，更适合 Render/Fly.io 等平台。
 
 ---
 
