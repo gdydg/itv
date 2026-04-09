@@ -1,99 +1,132 @@
 # 📺 M3U Proxy & Token Management System
 
-基于 Cloudflare Worker 的轻量级、高性能 M3U 直播源代理与用户分发系统。
+基于 Worker Runtime（Wrangler）+ Docker 的轻量级 M3U 代理与用户分发系统。
 
-本项目旨在帮助用户安全地管理和分享个人的 IPTV 直播源。通过 Cloudflare 的全球 CDN 节点进行 302 重定向，完美隐藏真实直播源地址，并内置了强大的多用户与 Token 鉴权系统，有效防止直播源被恶意盗用或滥发。
+本版本已改造为：
+- ✅ **Docker 部署**（可直接容器运行）
+- ✅ **Upstash Redis** 作为数据存储
+- ✅ **GitHub Actions 自动构建并推送 GHCR 镜像**
+
+---
 
 ## ✨ 核心功能
 
-* 👮‍♂️ **安全防风控**
-    * 独立的 Token 鉴权，支持设置最大允许请求 IP 数（支持设置为 0 即无限 IP）。
-    * **柔性封控**：触发 IP 限制后自动封锁访问并提示，但保留 Token，用户/管理员可在后台一键解封。
-    * 支持为 Token 设置存活时间（TTL），到期自动销毁。
-* 👥 **完整多用户系统**
-    * **用户看板**：支持用户自主注册、登录，绑定管理员下发的 Token，一键复制专属订阅链接。
-    * **管理后台**：管理员可全局概览所有 Token 的归属、IP 使用情况、到期时间，并支持强制清空 IP 或删除。
-* 🔄 **自动化与高可用**
-    * 利用 Cloudflare 原生 Cron Triggers，每天自动抓取并更新原始订阅源。
-    * 基于频道名称与 URL 的哈希算法生成固定 ID，确保后端更新源时，用户端的播放链接不会失效。
-* 🛡️ **真实源保护**
-    * 支持解析 M3U 文件的 `tvg-logo` 和 `group-title`。
-    * 客户端只与 Cloudflare Worker 交互，底层真实 M3U 链接被完全隐藏。
+* Token 鉴权 + IP 限制（支持 0 表示无限）
+* 用户注册/登录/绑定 Token
+* 管理后台：源配置、同步、Token 管理、通知发布
+* `/play/:id` 302 转发隐藏真实源地址
+* 提供 `/sub`、`/sub/tvbox`、`/sub/txt` 三种订阅格式
 
 ---
 
-## 🗃️ 数据库迁移到 D1
+## 🗄️ 数据库：Upstash Redis
 
-已提供 D1 迁移文档和建表 SQL：
+项目使用以下环境变量连接 Upstash：
 
-- 迁移步骤说明：`docs/D1_MIGRATION.md`
-- D1 Schema：`docs/d1-schema.sql`
+- `UPSTASH_REDIS_REST_URL`
+- `UPSTASH_REDIS_REST_TOKEN`
 
-你可以按文档先做读路径迁移，再迁移写路径，最后下线 KV。
-
----
-
-## 🚀 部署指南 (Cloudflare 网页端)
-
-无需在本地安装任何环境，你可以直接通过 Cloudflare 的网页控制台完成所有部署和配置。
-
-### 第一步：创建 D1 数据库
-当前版本已直接使用 Cloudflare D1（不再依赖 KV）存储用户数据、Token 和频道列表。
-1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)。
-2. 在左侧菜单找到 **Workers 和 Pages** -> **D1 SQL 数据库**。
-3. 点击 **创建数据库**，建议名称 `iptv-db`。
-4. 创建后复制数据库 ID，填入 `wrangler.toml` 的 `[[d1_databases]]` 配置。
-
-### 第二步：创建 Worker 服务
-1. 回到 **Workers 和 Pages** -> **概述**。
-2. 点击 **创建应用程序** -> 点击 **创建 Worker**。
-3. 给你的 Worker 起个名字（例如 `m3u-proxy`），点击 **部署**。
-4. 部署成功后，点击 **编辑代码**。
-5. 将本项目 `src/index.js` 中的所有代码复制，并**完全覆盖**网页编辑器里的默认代码。
-6. 点击右上角的 **部署** 保存代码。
-
-### 第三步：绑定 D1 与配置环境变量
-这是最重要的一步，必须绑定 D1 才能正常运行。
-1. 回到你刚刚创建的 Worker 的管理页面。
-2. 点击顶部菜单的 **设置** -> **变量**。
-3. **绑定 D1 数据库**：
-   * 在“D1 数据库绑定”处点击“添加绑定”。
-   * **变量名称**必须严格填写为：`IPTV_DB`。
-   * 数据库选择你第一步创建的 `iptv-db`（或你的实际名称）。
-4. **设置管理员账号密码**（可选）：
-   * 在“环境变量”处点击“添加变量”。
-   * 添加 `DEFAULT_ADMIN_USER`。
-   * 添加 `DEFAULT_ADMIN_PASS`。
-5. 点击底部的 **保存并部署**。
-
-### 第四步：设置自动更新 (Cron 定时任务)
-让系统每天自动去拉取你的原始直播源，保持频道最新。
-1. 在 Worker 管理页面，点击顶部菜单的 **触发器**。
-2. 找到 **Cron 触发器**，点击 **添加 Cron 触发器**。
-3. 建议设置为每天凌晨更新（例如输入表达式 `0 3 * * *`），点击添加。
+可在 [Upstash 控制台](https://console.upstash.com/) 创建 Redis 并获取 REST URL 与 Token。
 
 ---
 
-## 🎮 使用流程
+## 🐳 Docker 部署
 
-### 1. 管理员初始化源
-* 访问 `https://你的worker域名.workers.dev/admin`。
-* 输入环境变量中设置的管理员账密登录。
-* 在“原始直播源设置”中，填入你的底层 M3U 链接，点击**保存**，然后点击**立即抓取**。
+### 1) 本地构建
 
-### 2. 生成与分发 Token (激活码)
-* 在管理员后台的“Token 管理”模块，输入一个方便记忆的词作为 Token（例如 `VIP888`）。
-* 设置允许的 IP 数（填 0 代表不限制），以及有效期。
-* 点击**生成**。将 `VIP888` 这个“激活码”发送给你的朋友/用户。
+```bash
+docker build -t m3ugc:local .
+```
 
-### 3. 用户认领与观看
-* 用户访问你的 Worker 根目录 `https://你的worker域名.workers.dev/`。
-* 自动跳转登录页，用户自己注册一个账号并登录。
-* 在用户控制台中，输入 `VIP888` 点击**立即绑定**。
-* 绑定成功后，列表中会出现专属的 M3U 订阅链接，点击“复制订阅链接”即可导入到 PotPlayer、VLC 或 Apple TV 等播放器中观看。
+### 2) 运行容器
+
+```bash
+docker run -d --name m3ugc \
+  -p 8787:8787 \
+  -e UPSTASH_REDIS_REST_URL="https://<your-upstash>.upstash.io" \
+  -e UPSTASH_REDIS_REST_TOKEN="<your-token>" \
+  -e DEFAULT_ADMIN_USER="admin" \
+  -e DEFAULT_ADMIN_PASS="admin123" \
+  -e LINUXDO_CLIENT_ID="<optional>" \
+  -e LINUXDO_CLIENT_SECRET="<optional>" \
+  -e NODELOC_CLIENT_ID="<optional>" \
+  -e NODELOC_CLIENT_SECRET="<optional>" \
+  m3ugc:local
+```
+
+访问：
+- 用户面板：`http://localhost:8787/`
+- 管理后台：`http://localhost:8787/admin`
+
+### 3) 两个 OAuth 授权登录（可选）
+
+项目内的 **Linux DO** 与 **NodeLoc** 授权登录逻辑仍保留，配置对应环境变量后即可启用：
+
+- `LINUXDO_CLIENT_ID`
+- `LINUXDO_CLIENT_SECRET`
+- `NODELOC_CLIENT_ID`
+- `NODELOC_CLIENT_SECRET`
+
+对应回调地址：
+
+- `http://<你的域名>/api/auth/linuxdo/callback`
+- `http://<你的域名>/api/auth/nodeloc/callback`
+
+### 4) 外部 Cloudflare Workers Cron 定时抓取
+
+已移除运行时内置 `scheduled` 触发，改为显式 HTTP 触发，便于你用外部 Cloudflare Workers Cron 调用。
+
+请配置环境变量：
+
+- `CRON_SECRET`
+
+触发地址（GET/POST 都可）：
+
+- `http://<你的域名>/api/cron/sync?key=<CRON_SECRET>`
+- 或请求头带：`x-cron-key: <CRON_SECRET>` 调用 `http://<你的域名>/api/cron/sync`
+
+返回 JSON 即同步结果（同管理后台“立即抓取”逻辑）。
 
 ---
 
-## ⚠️ 注意事项
-* **跨域问题**：代码已内置 CORS 跨域头，支持主流 Web 播放器直接调用。
-* **KV 延迟**：Cloudflare KV 属于最终一致性数据库，全球同步存在几十秒的延迟。用户刚绑定 Token 后立刻高并发请求，极小概率可能会短暂误触发 IP 限制。
+## 📦 GHCR 自动构建
+
+仓库内置工作流：`.github/workflows/ghcr.yml`
+
+触发条件：
+- push 到 `main`
+- push 标签 `v*`
+- 手动触发 `workflow_dispatch`
+
+镜像地址格式：
+
+```text
+ghcr.io/<owner>/<repo>:latest
+ghcr.io/<owner>/<repo>:<tag>
+ghcr.io/<owner>/<repo>:sha-xxxxxxx
+```
+
+---
+
+## 🛠️ 开发
+
+```bash
+npm install
+npm run dev
+```
+
+容器/Render 启动命令（生产部署使用）：
+
+```bash
+npm run start
+```
+
+> `npm run start` 现在是 Node HTTP Server（`src/server.js`），不依赖 `wrangler dev`，更适合 Render/Fly.io 等平台。
+
+---
+
+## 🔐 备注
+
+- 默认管理员账号密码可通过 `DEFAULT_ADMIN_USER` / `DEFAULT_ADMIN_PASS` 覆盖。
+- Redis key TTL 用于实现 Token 与 Session 过期。
+- 管理后台展示过期时间时，基于写入时同步保存的过期元数据。
