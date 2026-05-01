@@ -360,6 +360,7 @@ async function generateUserSubscription(request, env, url, format = 'm3u') {
 
   const isValid = await dbStore(env).get('token:' + token);
   if (isValid === null) return new Response('Invalid Token or Expired', { status: 403 });
+  await dbStore(env).put('token_last_sub:' + token, String(Date.now()));
 
   const channels = await getAuthorizedChannels(env, token);
   let hiddenGroups = safeJsonParse(await dbStore(env).get('token_hidden_groups:' + token), []);
@@ -563,6 +564,8 @@ async function handleAdminAPI(request, env, url) {
       const owner = await dbStore(env).get('owner:' + t) || '未绑定';
       const groups = await dbStore(env).get('token_groups:' + t) || '*';
       const notice = await dbStore(env).get('token_notice:' + t) || '';
+      const lastSubTs = await dbStore(env).get('token_last_sub:' + t);
+      const lastSubAt = lastSubTs ? new Date(Number(lastSubTs)).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '从未获取';
 
       let expireText = '永久有效';
       if (k.expiration) {
@@ -580,7 +583,8 @@ async function handleAdminAPI(request, env, url) {
         expireText,
         owner,
         groups,
-        notice
+        notice,
+        lastSubAt
       };
     }));
     return Response.json(tokens);
@@ -610,7 +614,8 @@ async function handleAdminAPI(request, env, url) {
       'token_duration:' + body.token,
       'token_groups:' + body.token,
       'token_notice:' + body.token,
-      'token_hidden_groups:' + body.token
+      'token_hidden_groups:' + body.token,
+      'token_last_sub:' + body.token
     ]);
     return Response.json({ success: true });
   }
@@ -766,9 +771,9 @@ function renderAdminPage() {
   <div class="card"><h2>1. 系统通知管理</h2><textarea id="adminAnnouncement" rows="3" style="width:100%;margin-bottom:10px;"></textarea><br><button class="blue" onclick="saveAnnouncement()">发布 / 更新通知</button><button class="danger" onclick="clearAnnouncement()" style="margin-left:10px;">清空通知</button></div>
   <div class="card"><h2>2. 原始直播源配置</h2><p>有效去重频道数 <span id="chCount" style="font-weight:bold;color:#10b981;">0</span></p><textarea id="sourceUrl" rows="4" style="width:100%;margin-bottom:10px;"></textarea><br><button onclick="saveConfig()">保存源配置</button><button class="blue" onclick="syncM3U()" style="margin-left:10px;">立即抓取/更新</button></div>
   <div class="card" style="overflow-x:auto;"><h2>3. Token 管理</h2><div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;"><input id="newToken" placeholder="生成新 Token" style="flex:1;min-width:150px;"><input type="number" id="newLimit" placeholder="IP限制(0为无限)" value="3" style="width:120px;"><input type="number" id="expireHours" placeholder="有效期(小时)" style="width:120px;"><input id="tokenGroups" placeholder="授权分组" style="flex:1;min-width:150px;" value="*"><input id="tokenNotice" placeholder="注意事项/留言" style="flex:1.5;min-width:200px;"><button onclick="addToken()" style="width:80px;">生成</button></div>
-  <table><thead><tr><th>Token</th><th>归属用户</th><th>IP 状态</th><th>授权分组</th><th>注意事项</th><th>过期时间</th><th>操作</th></tr></thead><tbody id="tokenList"></tbody></table></div>
+  <table><thead><tr><th>Token</th><th>归属用户</th><th>IP 状态</th><th>授权分组</th><th>注意事项</th><th>最近获取订阅</th><th>过期时间</th><th>操作</th></tr></thead><tbody id="tokenList"></tbody></table></div>
   </div><script>
-  async function loadData(){const status=await (await fetch('/admin/api/status')).json();document.getElementById('sourceUrl').value=status.sourceUrl;document.getElementById('adminAnnouncement').value=status.announcement||'';document.getElementById('chCount').innerText=status.channelCount;const tokens=await (await fetch('/admin/api/tokens')).json();let html='';tokens.forEach(t=>{const limitTxt=t.limit===0?'无限':(t.used+'/'+t.limit);const groups=t.groups==='*'?'<span class="badge" style="background:#dcfce7;color:#166534;">全部源</span>':'<span class="badge">'+t.groups+'</span>';const notice=t.notice||'-';html+='<tr><td>'+t.token+'</td><td>'+t.owner+'</td><td><span title="'+t.ips.join(', ')+'">'+limitTxt+'</span></td><td>'+groups+'</td><td>'+notice+'</td><td>'+t.expireText+'</td><td><button class="warning" onclick="resetIp(\\''+t.token+'\\')" style="margin-right:5px;padding:4px 8px;font-size:12px;">清IP</button><button class="danger" onclick="delToken(\\''+t.token+'\\')" style="padding:4px 8px;font-size:12px;">删</button></td></tr>';});document.getElementById('tokenList').innerHTML=html;}
+  async function loadData(){const status=await (await fetch('/admin/api/status')).json();document.getElementById('sourceUrl').value=status.sourceUrl;document.getElementById('adminAnnouncement').value=status.announcement||'';document.getElementById('chCount').innerText=status.channelCount;const tokens=await (await fetch('/admin/api/tokens')).json();let html='';tokens.forEach(t=>{const limitTxt=t.limit===0?'无限':(t.used+'/'+t.limit);const groups=t.groups==='*'?'<span class="badge" style="background:#dcfce7;color:#166534;">全部源</span>':'<span class="badge">'+t.groups+'</span>';const notice=t.notice||'-';html+='<tr><td>'+t.token+'</td><td>'+t.owner+'</td><td><span title="'+t.ips.join(', ')+'">'+limitTxt+'</span></td><td>'+groups+'</td><td>'+notice+'</td><td>'+t.lastSubAt+'</td><td>'+t.expireText+'</td><td><button class="warning" onclick="resetIp(\\''+t.token+'\\')" style="margin-right:5px;padding:4px 8px;font-size:12px;">清IP</button><button class="danger" onclick="delToken(\\''+t.token+'\\')" style="padding:4px 8px;font-size:12px;">删</button></td></tr>';});document.getElementById('tokenList').innerHTML=html;}
   async function saveAnnouncement(){const announcement=document.getElementById('adminAnnouncement').value;await fetch('/admin/api/announcement',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({announcement})});alert('通知更新成功！');}
   async function clearAnnouncement(){document.getElementById('adminAnnouncement').value='';await saveAnnouncement();}
   async function saveConfig(){const sourceUrl=document.getElementById('sourceUrl').value;await fetch('/admin/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sourceUrl})});alert('源配置保存成功');}
