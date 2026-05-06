@@ -142,6 +142,11 @@ function createRedisStore(redisConfig) {
       await command(['SET', META_PREFIX + key, String(expiration), 'EXAT', expiration]);
     },
 
+    async persist(key) {
+      await command(['PERSIST', key]);
+      await command(['DEL', META_PREFIX + key]);
+    },
+
     async list(options = {}) {
       const prefix = options.prefix || '';
       const keys = (await scanKeys(prefix + '*')).sort();
@@ -322,6 +327,7 @@ async function handlePlay(request, env, url) {
 
   const limitStr = await dbStore(env).get('token:' + token);
   if (limitStr === null) return new Response('Invalid Token or Expired', { status: 403 });
+  await applyTokenResetPolicy(env, token);
 
   const limit = parseInt(limitStr || '0', 10);
   const clientIP = request.headers.get('x-forwarded-for') || request.headers.get('cf-connecting-ip') || '127.0.0.1';
@@ -360,6 +366,7 @@ async function generateUserSubscription(request, env, url, format = 'm3u') {
 
   const isValid = await dbStore(env).get('token:' + token);
   if (isValid === null) return new Response('Invalid Token or Expired', { status: 403 });
+  await applyTokenResetPolicy(env, token);
   await dbStore(env).put('token_last_sub:' + token, String(Date.now()));
 
   const channels = await getAuthorizedChannels(env, token);
@@ -564,14 +571,17 @@ async function handleAdminAPI(request, env, url) {
       const owner = await dbStore(env).get('owner:' + t) || '未绑定';
       const groups = await dbStore(env).get('token_groups:' + t) || '*';
       const notice = await dbStore(env).get('token_notice:' + t) || '';
+      const resetIntervalHours = Number(await dbStore(env).get('token_ip_reset_interval:' + t) || '0');
+      const durationHours = Number(await dbStore(env).get('token_duration:' + t) || '0');
       const lastSubTs = await dbStore(env).get('token_last_sub:' + t);
+      const lastResetTs = Number(await dbStore(env).get('token_last_reset_at:' + t) || '0');
       const lastSubAt = lastSubTs ? new Date(Number(lastSubTs)).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '从未获取';
+      const lastResetAt = lastResetTs > 0 ? new Date(lastResetTs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '从未重置';
 
       let expireText = '永久有效';
       if (k.expiration) {
         expireText = new Date(k.expiration * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
       } else {
-        const durationHours = await dbStore(env).get('token_duration:' + t);
         if (durationHours && owner === '未绑定') expireText = `绑定后 ${durationHours} 小时失效`;
       }
 
@@ -584,7 +594,10 @@ async function handleAdminAPI(request, env, url) {
         owner,
         groups,
         notice,
-        lastSubAt
+        lastSubAt,
+        resetIntervalHours,
+        lastResetAt,
+        durationHours
       };
     }));
     return Response.json(tokens);
@@ -602,6 +615,47 @@ async function handleAdminAPI(request, env, url) {
     } else {
       await dbStore(env).delete('token_duration:' + body.token);
     }
+    if (body.resetIntervalHours && Number(body.resetIntervalHours) > 0) {
+      await dbStore(env).put('token_ip_reset_interval:' + body.token, String(body.resetIntervalHours));
+    } else {
+      await dbStore(env).delete('token_ip_reset_interval:' + body.token);
+    }
+    return Response.json({ success: true });
+  }
+
+  if (request.method === 'PUT' && route === 'token') {
+    const body = await request.json();
+    const existing = await dbStore(env).get('token:' + body.token);
+    if (existing === null) return Response.json({ success: false, msg: 'Token 不存在' }, { status: 404 });
+
+    const limitVal = body.limit === '' ? '0' : String(body.limit ?? existing);
+    await dbStore(env).put('token:' + body.token, limitVal);
+    await dbStore(env).put('token_groups:' + body.token, body.groups || '*');
+    await dbStore(env).put('token_notice:' + body.token, body.notice || '');
+
+    if (body.resetIntervalHours && Number(body.resetIntervalHours) > 0) {
+      await dbStore(env).put('token_ip_reset_interval:' + body.token, String(body.resetIntervalHours));
+    } else {
+      await dbStore(env).delete('token_ip_reset_interval:' + body.token);
+    }
+
+    if (body.expireHours !== undefined) {
+      const owner = await dbStore(env).get('owner:' + body.token);
+      const expireHoursNum = Number(body.expireHours || '0');
+      if (expireHoursNum > 0) {
+        if (owner) {
+          const remainTtl = await dbStore(env).ttl('token:' + body.token);
+          const addSeconds = Math.max(60, expireHoursNum * 3600);
+          const nextTtl = remainTtl > 0 ? remainTtl + addSeconds : addSeconds;
+          await dbStore(env).expire('token:' + body.token, nextTtl);
+          await dbStore(env).delete('token_duration:' + body.token);
+        } else {
+          await dbStore(env).put('token_duration:' + body.token, String(expireHoursNum));
+        }
+      } else if (!owner) {
+        await dbStore(env).delete('token_duration:' + body.token);
+      }
+    }
     return Response.json({ success: true });
   }
 
@@ -615,7 +669,9 @@ async function handleAdminAPI(request, env, url) {
       'token_groups:' + body.token,
       'token_notice:' + body.token,
       'token_hidden_groups:' + body.token,
-      'token_last_sub:' + body.token
+      'token_last_sub:' + body.token,
+      'token_ip_reset_interval:' + body.token,
+      'token_last_reset_at:' + body.token
     ]);
     return Response.json({ success: true });
   }
@@ -623,10 +679,24 @@ async function handleAdminAPI(request, env, url) {
   if (request.method === 'POST' && route === 'reset_ip') {
     const body = await request.json();
     await dbStore(env).put('ips:' + body.token, []);
+    await dbStore(env).put('token_last_reset_at:' + body.token, String(Date.now()));
     return Response.json({ success: true });
   }
 
   return new Response('Not Found', { status: 404 });
+}
+
+async function applyTokenResetPolicy(env, token) {
+  const intervalHours = Number(await dbStore(env).get('token_ip_reset_interval:' + token) || '0');
+  if (intervalHours <= 0) return;
+
+  const now = Date.now();
+  const intervalMs = intervalHours * 3600 * 1000;
+  const lastResetAt = Number(await dbStore(env).get('token_last_reset_at:' + token) || '0');
+  if (!lastResetAt || now - lastResetAt >= intervalMs) {
+    await dbStore(env).put('ips:' + token, []);
+    await dbStore(env).put('token_last_reset_at:' + token, String(now));
+  }
 }
 
 function generateFixedId(group, name, url) {
@@ -770,16 +840,18 @@ function renderAdminPage() {
   </head><body><div class="container"><h1>管理后台</h1>
   <div class="card"><h2>1. 系统通知管理</h2><textarea id="adminAnnouncement" rows="3" style="width:100%;margin-bottom:10px;"></textarea><br><button class="blue" onclick="saveAnnouncement()">发布 / 更新通知</button><button class="danger" onclick="clearAnnouncement()" style="margin-left:10px;">清空通知</button></div>
   <div class="card"><h2>2. 原始直播源配置</h2><p>有效去重频道数 <span id="chCount" style="font-weight:bold;color:#10b981;">0</span></p><textarea id="sourceUrl" rows="4" style="width:100%;margin-bottom:10px;"></textarea><br><button onclick="saveConfig()">保存源配置</button><button class="blue" onclick="syncM3U()" style="margin-left:10px;">立即抓取/更新</button></div>
-  <div class="card" style="overflow-x:auto;"><h2>3. Token 管理</h2><div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;"><input id="newToken" placeholder="生成新 Token" style="flex:1;min-width:150px;"><input type="number" id="newLimit" placeholder="IP限制(0为无限)" value="3" style="width:120px;"><input type="number" id="expireHours" placeholder="有效期(小时)" style="width:120px;"><input id="tokenGroups" placeholder="授权分组" style="flex:1;min-width:150px;" value="*"><input id="tokenNotice" placeholder="注意事项/留言" style="flex:1.5;min-width:200px;"><button onclick="addToken()" style="width:80px;">生成</button></div>
-  <table><thead><tr><th>Token</th><th>归属用户</th><th>IP 状态</th><th>授权分组</th><th>注意事项</th><th>最近获取订阅</th><th>过期时间</th><th>操作</th></tr></thead><tbody id="tokenList"></tbody></table></div>
+  <div class="card" style="overflow-x:auto;"><h2>3. Token 管理</h2><div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;"><input id="newToken" placeholder="生成新 Token" style="flex:1;min-width:150px;"><input type="number" id="newLimit" placeholder="IP限制(0为无限)" value="3" style="width:120px;"><input type="number" id="expireHours" placeholder="有效期(小时)" style="width:120px;"><input id="tokenGroups" placeholder="授权分组" style="flex:1;min-width:150px;" value="*"><input id="tokenNotice" placeholder="注意事项/留言" style="flex:1.5;min-width:200px;"><input type="number" id="resetIntervalHours" placeholder="自动清IP间隔(小时)" style="width:170px;"><button onclick="addToken()" style="width:80px;">生成</button></div>
+  <table><thead><tr><th>Token</th><th>归属用户</th><th>IP 状态</th><th>授权分组</th><th>注意事项</th><th>自动清IP</th><th>最近获取订阅</th><th>过期时间</th><th>操作</th></tr></thead><tbody id="tokenList"></tbody></table></div>
   </div><script>
-  async function loadData(){const status=await (await fetch('/admin/api/status')).json();document.getElementById('sourceUrl').value=status.sourceUrl;document.getElementById('adminAnnouncement').value=status.announcement||'';document.getElementById('chCount').innerText=status.channelCount;const tokens=await (await fetch('/admin/api/tokens')).json();let html='';tokens.forEach(t=>{const limitTxt=t.limit===0?'无限':(t.used+'/'+t.limit);const groups=t.groups==='*'?'<span class="badge" style="background:#dcfce7;color:#166534;">全部源</span>':'<span class="badge">'+t.groups+'</span>';const notice=t.notice||'-';html+='<tr><td>'+t.token+'</td><td>'+t.owner+'</td><td><span title="'+t.ips.join(', ')+'">'+limitTxt+'</span></td><td>'+groups+'</td><td>'+notice+'</td><td>'+t.lastSubAt+'</td><td>'+t.expireText+'</td><td><button class="warning" onclick="resetIp(\\''+t.token+'\\')" style="margin-right:5px;padding:4px 8px;font-size:12px;">清IP</button><button class="danger" onclick="delToken(\\''+t.token+'\\')" style="padding:4px 8px;font-size:12px;">删</button></td></tr>';});document.getElementById('tokenList').innerHTML=html;}
+  async function loadData(){const status=await (await fetch('/admin/api/status')).json();document.getElementById('sourceUrl').value=status.sourceUrl;document.getElementById('adminAnnouncement').value=status.announcement||'';document.getElementById('chCount').innerText=status.channelCount;const tokens=await (await fetch('/admin/api/tokens')).json();let html='';tokens.forEach(t=>{const limitTxt=t.limit===0?'无限':(t.used+'/'+t.limit);const groups=t.groups==='*'?'<span class="badge" style="background:#dcfce7;color:#166534;">全部源</span>':'<span class="badge">'+t.groups+'</span>';const notice=t.notice||'-';const resetTxt=t.resetIntervalHours>0?('每 '+t.resetIntervalHours+' 小时 / '+t.lastResetAt):'关闭';html+='<tr><td>'+t.token+'</td><td>'+t.owner+'</td><td><span title="'+t.ips.join(', ')+'">'+limitTxt+'</span></td><td>'+groups+'</td><td>'+notice+'</td><td>'+resetTxt+'</td><td>'+t.lastSubAt+'</td><td>'+t.expireText+'</td><td><button class="warning" onclick="resetIp(\\''+t.token+'\\')" style="margin-right:5px;padding:4px 8px;font-size:12px;">清IP</button><button class="blue" onclick="editToken(\''+t.token+'\')" style="margin-right:5px;padding:4px 8px;font-size:12px;">编辑</button><button class="danger" onclick="delToken(\\''+t.token+'\\')" style="padding:4px 8px;font-size:12px;">删</button></td></tr>';});document.getElementById('tokenList').innerHTML=html;}
   async function saveAnnouncement(){const announcement=document.getElementById('adminAnnouncement').value;await fetch('/admin/api/announcement',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({announcement})});alert('通知更新成功！');}
   async function clearAnnouncement(){document.getElementById('adminAnnouncement').value='';await saveAnnouncement();}
   async function saveConfig(){const sourceUrl=document.getElementById('sourceUrl').value;await fetch('/admin/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sourceUrl})});alert('源配置保存成功');}
   async function syncM3U(){const res=await fetch('/admin/api/sync',{method:'POST'});const data=await res.json();alert(data.success?data.msg:('失败: '+data.msg));loadData();}
-  async function addToken(){const token=document.getElementById('newToken').value;if(!token)return alert('请输入 Token');const limit=document.getElementById('newLimit').value;const expireHours=document.getElementById('expireHours').value;const groups=document.getElementById('tokenGroups').value||'*';const notice=document.getElementById('tokenNotice').value||'';await fetch('/admin/api/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,limit,expireHours,groups,notice})});document.getElementById('newToken').value='';document.getElementById('tokenNotice').value='';loadData();}
+  async function addToken(){const token=document.getElementById('newToken').value;if(!token)return alert('请输入 Token');const limit=document.getElementById('newLimit').value;const expireHours=document.getElementById('expireHours').value;const groups=document.getElementById('tokenGroups').value||'*';const notice=document.getElementById('tokenNotice').value||'';const resetIntervalHours=document.getElementById('resetIntervalHours').value;await fetch('/admin/api/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,limit,expireHours,groups,notice,resetIntervalHours})});document.getElementById('newToken').value='';document.getElementById('tokenNotice').value='';document.getElementById('resetIntervalHours').value='';loadData();}
   async function delToken(token){if(!confirm('确定删除吗？'))return;await fetch('/admin/api/token',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});loadData();}
+
+  async function editToken(token){const tokens=await (await fetch('/admin/api/tokens')).json();const t=tokens.find(x=>x.token===token);if(!t)return alert('Token 不存在');const limit=prompt('IP 限制(0为无限):',String(t.limit));if(limit===null)return;const expireHours=prompt('续期小时数(在当前到期时间上累加, 0不变):',String(t.durationHours||0));if(expireHours===null)return;const groups=prompt('授权分组(* 或 逗号分隔):',t.groups||'*');if(groups===null)return;const notice=prompt('注意事项:',t.notice||'');if(notice===null)return;const resetIntervalHours=prompt('自动清IP间隔(小时, 0关闭):',String(t.resetIntervalHours||0));if(resetIntervalHours===null)return;await fetch('/admin/api/token',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,limit,expireHours,groups,notice,resetIntervalHours})});loadData();}
   async function resetIp(token){await fetch('/admin/api/reset_ip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});loadData();}
   loadData();
   </script></body></html>`;
