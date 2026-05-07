@@ -23,6 +23,7 @@ function createRedisClient(redisUrl, options = {}) {
   let buffer = Buffer.alloc(0);
   const queue = [];
   let fallbackToPlainTried = false;
+  let connecting = null;
 
   function encodeCommand(args) {
     let out = `*${args.length}\r\n`;
@@ -93,6 +94,8 @@ function createRedisClient(redisUrl, options = {}) {
 
   async function connect() {
     if (socket && !socket.destroyed) return;
+    if (connecting) return connecting;
+    connecting = (async () => {
     const openSocket = (useTls) => (useTls
       ? tls.connect({ host: conf.host, port: conf.port, servername: conf.host })
       : net.createConnection({ host: conf.host, port: conf.port }));
@@ -104,6 +107,10 @@ function createRedisClient(redisUrl, options = {}) {
     });
     socket.on('error', (err) => {
       while (queue.length) queue.shift().reject(err);
+    });
+    socket.on('close', () => {
+      socket = undefined;
+      while (queue.length) queue.shift().reject(new Error('Redis connection closed'));
     });
     try {
       await new Promise((resolve, reject) => {
@@ -128,14 +135,30 @@ function createRedisClient(redisUrl, options = {}) {
       else await sendRaw(['AUTH', conf.password]);
     }
     if (conf.db) await sendRaw(['SELECT', conf.db]);
+    })();
+
+    try {
+      await connecting;
+    } finally {
+      connecting = null;
+    }
   }
 
-  async function command(args) {
+  async function command(args, retries = 1) {
     await connect();
-    return new Promise((resolve, reject) => {
+    try {
+      return await new Promise((resolve, reject) => {
       queue.push({ resolve, reject });
       socket.write(encodeCommand(args));
     });
+    } catch (err) {
+      if (retries > 0) {
+        try { socket?.destroy(); } catch (_) {}
+        socket = undefined;
+        return command(args, retries - 1);
+      }
+      throw err;
+    }
   }
 
   return { command };
@@ -165,6 +188,7 @@ function getBody(req) {
 }
 
 function getEnv() {
+  if (globalThis.__APP_ENV_CACHE) return globalThis.__APP_ENV_CACHE;
   const dbType = (process.env.DB_TYPE || 'upstash').toLowerCase();
   const env = {
     DB_TYPE: dbType,
@@ -183,6 +207,7 @@ function getEnv() {
       forceTls: String(process.env.REDIS_TLS || '').toLowerCase() === 'true'
     });
   }
+  globalThis.__APP_ENV_CACHE = env;
   return env;
 }
 
