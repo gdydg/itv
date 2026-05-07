@@ -22,6 +22,7 @@ function createRedisClient(redisUrl, options = {}) {
   let socket;
   let buffer = Buffer.alloc(0);
   const queue = [];
+  let fallbackToPlainTried = false;
 
   function encodeCommand(args) {
     let out = `*${args.length}\r\n`;
@@ -92,9 +93,11 @@ function createRedisClient(redisUrl, options = {}) {
 
   async function connect() {
     if (socket && !socket.destroyed) return;
-    socket = conf.tls
+    const openSocket = (useTls) => (useTls
       ? tls.connect({ host: conf.host, port: conf.port, servername: conf.host })
-      : net.createConnection({ host: conf.host, port: conf.port });
+      : net.createConnection({ host: conf.host, port: conf.port }));
+
+    socket = openSocket(conf.tls);
     socket.on('data', (chunk) => {
       buffer = Buffer.concat([buffer, chunk]);
       drain();
@@ -102,10 +105,20 @@ function createRedisClient(redisUrl, options = {}) {
     socket.on('error', (err) => {
       while (queue.length) queue.shift().reject(err);
     });
-    await new Promise((resolve, reject) => {
-      socket.once('connect', resolve);
-      socket.once('error', reject);
-    });
+    try {
+      await new Promise((resolve, reject) => {
+        socket.once('connect', resolve);
+        socket.once('error', reject);
+      });
+    } catch (err) {
+      if (conf.tls && options.forceTls === true && !fallbackToPlainTried) {
+        fallbackToPlainTried = true;
+        try { socket.destroy(); } catch (_) {}
+        conf.tls = false;
+        return connect();
+      }
+      throw err;
+    }
     const sendRaw = (args) => new Promise((resolve, reject) => {
       queue.push({ resolve, reject });
       socket.write(encodeCommand(args));

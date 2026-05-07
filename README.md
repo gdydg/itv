@@ -30,7 +30,7 @@
 
 - `REDIS_URL=redis://default:password@host:port`
 - 或 `REDIS_URL=rediss://default:password@host:port`（TLS）
-- 若供应商只给 `redis://` 但实际要求 TLS，可额外设置 `REDIS_TLS=true`
+- 若供应商只给 `redis://` 但实际要求 TLS，可额外设置 `REDIS_TLS=true`（若握手失败会自动回退到非 TLS，避免直接 500）
 
 > `DB_TYPE=redis` 适用于 Node/Docker 启动（`npm run start`）。Cloudflare Worker 线上环境请继续使用 Upstash REST 变量。
 
