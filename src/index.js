@@ -175,6 +175,27 @@ function decodeCookieSession(cookieHeader) {
   return match ? match[1] : null;
 }
 
+
+function normalizeIP(ip) {
+  const value = (ip || '').trim();
+  if (!value) return '';
+  if (value.startsWith('::ffff:')) return value.slice(7);
+  return value;
+}
+
+function getClientIP(request) {
+  const cfIP = normalizeIP(request.headers.get('cf-connecting-ip') || '');
+  const hasCloudflareTrace = !!request.headers.get('cf-ray');
+  if (hasCloudflareTrace && cfIP) return cfIP;
+
+  const xff = request.headers.get('x-forwarded-for') || '';
+  const firstForwarded = normalizeIP(xff.split(',')[0] || '');
+  if (firstForwarded) return firstForwarded;
+
+  if (cfIP) return cfIP;
+  return '127.0.0.1';
+}
+
 function safeJsonParse(value, fallback) {
   if (value == null) return fallback;
   if (typeof value !== 'string') return value;
@@ -330,7 +351,7 @@ async function handlePlay(request, env, url) {
   await applyTokenResetPolicy(env, token);
 
   const limit = parseInt(limitStr || '0', 10);
-  const clientIP = request.headers.get('x-forwarded-for') || request.headers.get('cf-connecting-ip') || '127.0.0.1';
+  const clientIP = getClientIP(request);
 
   if (limit > 0) {
     let ips = safeJsonParse(await dbStore(env).get('ips:' + token), []);
