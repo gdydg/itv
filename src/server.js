@@ -4,20 +4,21 @@ import tls from 'node:tls';
 import { Readable } from 'node:stream';
 import worker from './index.js';
 
-function parseRedisUrl(redisUrl) {
+function parseRedisUrl(redisUrl, options = {}) {
   const url = new URL(redisUrl);
+  const forceTls = options.forceTls === true;
   return {
     host: url.hostname,
     port: Number(url.port || 6379),
     username: decodeURIComponent(url.username || ''),
     password: decodeURIComponent(url.password || ''),
     db: url.pathname && url.pathname !== '/' ? Number(url.pathname.slice(1) || 0) : 0,
-    tls: url.protocol === 'rediss:'
+    tls: forceTls || url.protocol === 'rediss:'
   };
 }
 
-function createRedisClient(redisUrl) {
-  const conf = parseRedisUrl(redisUrl);
+function createRedisClient(redisUrl, options = {}) {
+  const conf = parseRedisUrl(redisUrl, options);
   let socket;
   let buffer = Buffer.alloc(0);
   const queue = [];
@@ -105,11 +106,15 @@ function createRedisClient(redisUrl) {
       socket.once('connect', resolve);
       socket.once('error', reject);
     });
+    const sendRaw = (args) => new Promise((resolve, reject) => {
+      queue.push({ resolve, reject });
+      socket.write(encodeCommand(args));
+    });
     if (conf.password) {
-      if (conf.username) await command(['AUTH', conf.username, conf.password]);
-      else await command(['AUTH', conf.password]);
+      if (conf.username) await sendRaw(['AUTH', conf.username, conf.password]);
+      else await sendRaw(['AUTH', conf.password]);
     }
-    if (conf.db) await command(['SELECT', conf.db]);
+    if (conf.db) await sendRaw(['SELECT', conf.db]);
   }
 
   async function command(args) {
@@ -161,7 +166,9 @@ function getEnv() {
     CRON_SECRET: process.env.CRON_SECRET
   };
   if (dbType === 'redis' && process.env.REDIS_URL) {
-    env.REDIS_CLIENT = createRedisClient(process.env.REDIS_URL);
+    env.REDIS_CLIENT = createRedisClient(process.env.REDIS_URL, {
+      forceTls: String(process.env.REDIS_TLS || '').toLowerCase() === 'true'
+    });
   }
   return env;
 }

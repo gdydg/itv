@@ -30,6 +30,7 @@
 
 - `REDIS_URL=redis://default:password@host:port`
 - 或 `REDIS_URL=rediss://default:password@host:port`（TLS）
+- 若供应商只给 `redis://` 但实际要求 TLS，可额外设置 `REDIS_TLS=true`
 
 > `DB_TYPE=redis` 适用于 Node/Docker 启动（`npm run start`）。Cloudflare Worker 线上环境请继续使用 Upstash REST 变量。
 
@@ -145,6 +146,7 @@ docker run -d --name m3ugc \
   -p 8787:8787 \
   -e DB_TYPE="redis" \
   -e REDIS_URL="redis://default:password@your-host:6379" \
+  -e REDIS_TLS="true" \
   -e DEFAULT_ADMIN_USER="admin" \
   -e DEFAULT_ADMIN_PASS="admin123" \
   m3ugc:local
