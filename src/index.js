@@ -649,8 +649,13 @@ async function handleAdminAPI(request, env, url) {
     const existing = await dbStore(env).get('token:' + body.token);
     if (existing === null) return Response.json({ success: false, msg: 'Token 不存在' }, { status: 404 });
 
+    const currentTtl = await dbStore(env).ttl('token:' + body.token);
     const limitVal = body.limit === '' ? '0' : String(body.limit ?? existing);
-    await dbStore(env).put('token:' + body.token, limitVal);
+    if (currentTtl > 0) {
+      await dbStore(env).put('token:' + body.token, limitVal, { expirationTtl: currentTtl });
+    } else {
+      await dbStore(env).put('token:' + body.token, limitVal);
+    }
     await dbStore(env).put('token_groups:' + body.token, body.groups || '*');
     await dbStore(env).put('token_notice:' + body.token, body.notice || '');
 
@@ -665,9 +670,8 @@ async function handleAdminAPI(request, env, url) {
       const expireHoursNum = Number(body.expireHours || '0');
       if (expireHoursNum > 0) {
         if (owner) {
-          const remainTtl = await dbStore(env).ttl('token:' + body.token);
           const addSeconds = Math.max(60, expireHoursNum * 3600);
-          const nextTtl = remainTtl > 0 ? remainTtl + addSeconds : addSeconds;
+          const nextTtl = currentTtl > 0 ? currentTtl + addSeconds : addSeconds;
           await dbStore(env).expire('token:' + body.token, nextTtl);
           await dbStore(env).delete('token_duration:' + body.token);
         } else {
