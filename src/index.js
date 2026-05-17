@@ -731,7 +731,8 @@ function generateFixedId(group, name, url) {
 
   try {
     const u = new URL(url);
-    const dynamicParams = ['txSecret', 'txTime', 't', 'token', 'sign', 'auth_key', 'expire', 'md5', 'wsSecret', 'wsTime', 'session', 'sid', 'uuid', 'v'];
+    // ⬇️ 修改在这里：添加了 'auth_id' 到参数过滤列表中
+    const dynamicParams = ['txSecret', 'txTime', 't', 'token', 'sign', 'auth_key', 'expire', 'md5', 'wsSecret', 'wsTime', 'session', 'sid', 'uuid', 'v', 'auth_id'];
     dynamicParams.forEach((p) => u.searchParams.delete(p));
     stableUrl = u.toString();
   } catch (_) {
