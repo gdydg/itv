@@ -31,7 +31,7 @@ export default {
 
     if (path.startsWith('/api/user/')) return handleUserAPI(request, env, url);
 
-    if (path === '/login') return html(renderLoginPage());
+    if (path === '/login') return html(renderLoginPage(env));
     if (path === '/') {
       const username = await getUserSession(request, env);
       if (!username) return Response.redirect(url.origin + '/login', 302);
@@ -206,10 +206,45 @@ function safeJsonParse(value, fallback) {
   }
 }
 
+
+function escapeHtmlAttr(value) {
+  return String(value).replace(/[&"'<>]/g, (ch) => ({
+    '&': '&amp;',
+    '"': '&quot;',
+    "'": '&#39;',
+    '<': '&lt;',
+    '>': '&gt;'
+  })[ch]);
+}
+
 async function getUserSession(request, env) {
   const sessionId = decodeCookieSession(request.headers.get('Cookie') || '');
   if (!sessionId) return null;
   return dbStore(env).get('session:' + sessionId);
+}
+
+
+async function verifyTurnstile(request, env, token) {
+  if (!env.CLOUDFLARE_TURNSTILE_SECRET_KEY) return { success: true };
+  if (!token) return { success: false, msg: '请先完成人机验证' };
+
+  const form = new URLSearchParams();
+  form.set('secret', env.CLOUDFLARE_TURNSTILE_SECRET_KEY);
+  form.set('response', token);
+  form.set('remoteip', getClientIP(request));
+
+  try {
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form
+    });
+    if (!res.ok) return { success: false, msg: '人机验证服务暂不可用，请稍后再试' };
+    const data = await res.json();
+    return data.success ? { success: true } : { success: false, msg: '人机验证失败，请重试' };
+  } catch (_) {
+    return { success: false, msg: '人机验证服务暂不可用，请稍后再试' };
+  }
 }
 
 async function checkAuth(request, env) {
@@ -436,6 +471,8 @@ async function handleUserAPI(request, env, url) {
 
   if (request.method === 'POST' && route === 'register') {
     const body = await request.json();
+    const turnstileCheck = await verifyTurnstile(request, env, body.turnstileToken);
+    if (!turnstileCheck.success) return Response.json({ success: false, msg: turnstileCheck.msg });
     if (!body.username || !body.password) return Response.json({ success: false, msg: '缺少账密' });
     if (await dbStore(env).get('user:' + body.username)) return Response.json({ success: false, msg: '用户名已存在' });
     await dbStore(env).put('user:' + body.username, body.password);
@@ -444,6 +481,8 @@ async function handleUserAPI(request, env, url) {
 
   if (request.method === 'POST' && route === 'login') {
     const body = await request.json();
+    const turnstileCheck = await verifyTurnstile(request, env, body.turnstileToken);
+    if (!turnstileCheck.success) return Response.json({ success: false, msg: turnstileCheck.msg });
     const storedPass = await dbStore(env).get('user:' + body.username);
     if (!storedPass || storedPass !== body.password) return Response.json({ success: false, msg: '账号或密码错误' });
     const sessionId = crypto.randomUUID();
@@ -830,11 +869,15 @@ async function updateM3USource(env) {
   return { success: false, msg: '所有源均未找到有效频道。错误信息: ' + errors.join('; ') };
 }
 
-function renderLoginPage() {
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>系统登录/注册</title>
-  <style>body{font-family:system-ui;background:#f4f4f5;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.card{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 4px 6px rgba(0,0,0,.1);width:300px;text-align:center}input{width:100%;padding:10px;margin:10px 0;border:1px solid #ddd;border-radius:4px;box-sizing:border-box}button{color:#fff;border:none;padding:10px;border-radius:4px;cursor:pointer;width:100%;margin-top:10px;font-weight:700}.btn-login{background:#3b82f6}.btn-reg{background:#10b981}.oauth-btn{margin-top:15px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:400}.btn-linuxdo{background:#232323}.btn-nodeloc{background:#007bff}.divider{margin:20px 0;color:#999;font-size:14px;display:flex;align-items:center}.divider::before,.divider::after{content:"";flex:1;border-bottom:1px solid #eee}.divider::before{margin-right:10px}.divider::after{margin-left:10px}</style>
-  </head><body><div class="card"><h2>订阅系统</h2><input type="text" id="user" placeholder="用户名"><input type="password" id="pass" placeholder="密码"><button class="btn-login" onclick="doAction('login')">登录</button><button class="btn-reg" onclick="doAction('register')">注册新账号</button><div class="divider">或者</div><button class="oauth-btn btn-linuxdo" onclick="window.location.href='/api/auth/linuxdo'">使用 Linux DO 登录</button><button class="oauth-btn btn-nodeloc" onclick="window.location.href='/api/auth/nodeloc'">使用 NodeLoc 登录</button></div>
-  <script>async function doAction(action){const u=document.getElementById('user').value;const p=document.getElementById('pass').value;if(!u||!p)return alert('请输入账密');const res=await fetch('/api/user/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});const data=await res.json();if(data.success){if(action==='register')alert('注册成功，请登录！');else window.location.href='/'}else alert(data.msg)}</script></body></html>`;
+function renderLoginPage(env = {}) {
+  const turnstileSiteKey = escapeHtmlAttr(env.CLOUDFLARE_TURNSTILE_SITE_KEY || '');
+  const turnstileScript = turnstileSiteKey ? '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>' : '';
+  const turnstileWidget = turnstileSiteKey ? `<div class="turnstile-wrap"><div class="cf-turnstile" data-sitekey="${turnstileSiteKey}"></div></div>` : '';
+
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>系统登录/注册</title>${turnstileScript}
+  <style>body{font-family:system-ui;background:#f4f4f5;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.card{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 4px 6px rgba(0,0,0,.1);width:300px;text-align:center}input{width:100%;padding:10px;margin:10px 0;border:1px solid #ddd;border-radius:4px;box-sizing:border-box}button{color:#fff;border:none;padding:10px;border-radius:4px;cursor:pointer;width:100%;margin-top:10px;font-weight:700}.btn-login{background:#3b82f6}.btn-reg{background:#10b981}.oauth-btn{margin-top:15px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:400}.btn-linuxdo{background:#232323}.btn-nodeloc{background:#007bff}.turnstile-wrap{display:flex;justify-content:center;margin:14px 0 4px}.divider{margin:20px 0;color:#999;font-size:14px;display:flex;align-items:center}.divider::before,.divider::after{content:"";flex:1;border-bottom:1px solid #eee}.divider::before{margin-right:10px}.divider::after{margin-left:10px}</style>
+  </head><body><div class="card"><h2>订阅系统</h2><input type="text" id="user" placeholder="用户名"><input type="password" id="pass" placeholder="密码">${turnstileWidget}<button class="btn-login" onclick="doAction('login')">登录</button><button class="btn-reg" onclick="doAction('register')">注册新账号</button><div class="divider">或者</div><button class="oauth-btn btn-linuxdo" onclick="window.location.href='/api/auth/linuxdo'">使用 Linux DO 登录</button><button class="oauth-btn btn-nodeloc" onclick="window.location.href='/api/auth/nodeloc'">使用 NodeLoc 登录</button></div>
+  <script>async function doAction(action){const u=document.getElementById('user').value;const p=document.getElementById('pass').value;const t=document.querySelector('[name=\"cf-turnstile-response\"]')?.value||'';if(!u||!p)return alert('请输入账密');const res=await fetch('/api/user/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,turnstileToken:t})});const data=await res.json();if(data.success){if(action==='register'){alert('注册成功，请登录！');window.turnstile?.reset();}else window.location.href='/'}else{alert(data.msg);window.turnstile?.reset();}}</script></body></html>`;
 }
 
 function renderUserDashboard(username) {
