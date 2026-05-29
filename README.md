@@ -51,6 +51,8 @@ docker run -d --name m3ugc \
   -e LINUXDO_CLIENT_SECRET="<optional>" \
   -e NODELOC_CLIENT_ID="<optional>" \
   -e NODELOC_CLIENT_SECRET="<optional>" \
+  -e CLOUDFLARE_TURNSTILE_SITE_KEY="<optional>" \
+  -e CLOUDFLARE_TURNSTILE_SECRET_KEY="<optional>" \
   m3ugc:local
 ```
 
@@ -58,7 +60,16 @@ docker run -d --name m3ugc \
 - 用户面板：`http://localhost:8787/`
 - 管理后台：`http://localhost:8787/admin`
 
-### 3) 两个 OAuth 授权登录（可选）
+### 3) Cloudflare Turnstile 人机验证（可选）
+
+登录/注册页支持 Cloudflare Turnstile。若配置以下两个环境变量，页面会自动显示 Turnstile 小组件，并在账号密码登录/注册接口校验验证结果：
+
+- `CLOUDFLARE_TURNSTILE_SITE_KEY`
+- `CLOUDFLARE_TURNSTILE_SECRET_KEY`
+
+若不配置，登录页保持原有行为。
+
+### 4) 两个 OAuth 授权登录（可选）
 
 项目内的 **Linux DO** 与 **NodeLoc** 授权登录逻辑仍保留，配置对应环境变量后即可启用：
 
@@ -72,7 +83,7 @@ docker run -d --name m3ugc \
 - `http://<你的域名>/api/auth/linuxdo/callback`
 - `http://<你的域名>/api/auth/nodeloc/callback`
 
-### 4) 外部 Cloudflare Workers Cron 定时抓取
+### 5) 外部 Cloudflare Workers Cron 定时抓取
 
 已移除运行时内置 `scheduled` 触发，改为显式 HTTP 触发，便于你用外部 Cloudflare Workers Cron 调用。
 

@@ -7,7 +7,9 @@ RUN npm install --omit=dev
 
 COPY . .
 
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    CLOUDFLARE_TURNSTILE_SITE_KEY="" \
+    CLOUDFLARE_TURNSTILE_SECRET_KEY=""
 EXPOSE 8787
 
 CMD ["npm", "run", "start"]
