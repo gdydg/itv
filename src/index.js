@@ -770,9 +770,26 @@ function generateFixedId(group, name, url) {
 
   try {
     const u = new URL(url);
-    // ⬇️ 修改在这里：添加了 'auth_id' 到参数过滤列表中
-    const dynamicParams = ['txSecret', 'txTime', 't', 'token', 'sign', 'auth_key', 'expire', 'md5', 'wsSecret', 'wsTime', 'session', 'sid', 'uuid', 'v', 'auth_id', 'k', 'UID'];
+    
+    // ⬇️ 综合了所有动态参数（包含 B站 特有的和之前添加的）
+    const dynamicParams = [
+      'txSecret', 'txTime', 't', 'token', 'sign', 'auth_key', 'expire', 'expires', 
+      'md5', 'wsSecret', 'wsTime', 'session', 'sid', 'uuid', 'v', 'auth_id', 'k', 'UID',
+      'r', 's', 'trid', 'sk', 'flvsk', 'oi'
+    ];
     dynamicParams.forEach((p) => u.searchParams.delete(p));
+    
+    // ⬇️ 加入 B站 动态 CDN 节点和路径清洗逻辑
+    if (u.hostname.includes('bilivideo.com')) {
+      // 强行统一主机名，消除 ov-gotcha207 这种动态前缀
+      u.hostname = 'bilivideo.com';
+      // 提取核心的流路径 (比如 live_xxxx)，无视动态的外层目录
+      const match = u.pathname.match(/(live_[^\/]+)/);
+      if (match) {
+        u.pathname = '/' + match[1];
+      }
+    }
+
     stableUrl = u.toString();
   } catch (_) {
     stableUrl = url.split('?')[0];
