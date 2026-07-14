@@ -775,7 +775,7 @@ function generateFixedId(group, name, url) {
     const dynamicParams = [
       'txSecret', 'txTime', 't', 'token', 'sign', 'auth_key', 'expire', 'expires', 
       'md5', 'wsSecret', 'wsTime', 'session', 'sid', 'uuid', 'v', 'auth_id', 'k', 'UID',
-      'r', 's', 'trid', 'sk', 'flvsk', 'oi'
+      'r', 's', 'trid', 'sk', 'us', 'flvsk', 'oi'
     ];
     dynamicParams.forEach((p) => u.searchParams.delete(p));
     
