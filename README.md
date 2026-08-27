@@ -19,14 +19,20 @@
 
 ---
 
-## 🗄️ 数据库：Upstash Redis
+## 🗄️ 数据库：支持 Upstash 与标准 Redis
 
-项目使用以下环境变量连接 Upstash：
+默认使用 Upstash（`DB_TYPE=upstash`）：
 
 - `UPSTASH_REDIS_REST_URL`
 - `UPSTASH_REDIS_REST_TOKEN`
 
-可在 [Upstash 控制台](https://console.upstash.com/) 创建 Redis 并获取 REST URL 与 Token。
+也可切换为标准 Redis（`DB_TYPE=redis`），例如：
+
+- `REDIS_URL=redis://default:password@host:port`
+- 或 `REDIS_URL=rediss://default:password@host:port`（TLS）
+- 若供应商只给 `redis://` 但实际要求 TLS，可额外设置 `REDIS_TLS=true`（若握手失败会自动回退到非 TLS，避免直接 500）
+
+> `DB_TYPE=redis` 适用于 Node/Docker 启动（`npm run start`）。Cloudflare Worker 线上环境请继续使用 Upstash REST 变量。
 
 ---
 
@@ -43,6 +49,7 @@ docker build -t m3ugc:local .
 ```bash
 docker run -d --name m3ugc \
   -p 8787:8787 \
+  -e DB_TYPE="upstash" \
   -e UPSTASH_REDIS_REST_URL="https://<your-upstash>.upstash.io" \
   -e UPSTASH_REDIS_REST_TOKEN="<your-token>" \
   -e DEFAULT_ADMIN_USER="admin" \
@@ -141,3 +148,17 @@ npm run start
 - 默认管理员账号密码可通过 `DEFAULT_ADMIN_USER` / `DEFAULT_ADMIN_PASS` 覆盖。
 - Redis key TTL 用于实现 Token 与 Session 过期。
 - 管理后台展示过期时间时，基于写入时同步保存的过期元数据。
+
+
+### 2.1) 使用标准 Redis URL（可选）
+
+```bash
+docker run -d --name m3ugc \
+  -p 8787:8787 \
+  -e DB_TYPE="redis" \
+  -e REDIS_URL="redis://default:password@your-host:6379" \
+  -e REDIS_TLS="true" \
+  -e DEFAULT_ADMIN_USER="admin" \
+  -e DEFAULT_ADMIN_PASS="admin123" \
+  m3ugc:local
+```

@@ -1,6 +1,168 @@
 import http from 'node:http';
+import net from 'node:net';
+import tls from 'node:tls';
 import { Readable } from 'node:stream';
 import worker from './index.js';
+
+function parseRedisUrl(redisUrl, options = {}) {
+  const url = new URL(redisUrl);
+  const forceTls = options.forceTls === true;
+  return {
+    host: url.hostname,
+    port: Number(url.port || 6379),
+    username: decodeURIComponent(url.username || ''),
+    password: decodeURIComponent(url.password || ''),
+    db: url.pathname && url.pathname !== '/' ? Number(url.pathname.slice(1) || 0) : 0,
+    tls: forceTls || url.protocol === 'rediss:'
+  };
+}
+
+function createRedisClient(redisUrl, options = {}) {
+  const conf = parseRedisUrl(redisUrl, options);
+  let socket;
+  let buffer = Buffer.alloc(0);
+  const queue = [];
+  let fallbackToPlainTried = false;
+  let connecting = null;
+
+  function encodeCommand(args) {
+    let out = `*${args.length}\r\n`;
+    for (const arg of args) {
+      const value = String(arg);
+      out += `$${Buffer.byteLength(value)}\r\n${value}\r\n`;
+    }
+    return Buffer.from(out);
+  }
+
+  function readLine(start) {
+    const idx = buffer.indexOf('\r\n', start);
+    if (idx === -1) return null;
+    return { line: buffer.subarray(start, idx).toString(), next: idx + 2 };
+  }
+
+  function parseAt(pos = 0) {
+    if (buffer.length <= pos) return null;
+    const type = String.fromCharCode(buffer[pos]);
+    if (type === '+' || type === '-' || type === ':') {
+      const line = readLine(pos + 1);
+      if (!line) return null;
+      if (type === ':') return { value: Number(line.line), next: line.next };
+      if (type === '-') throw new Error(line.line);
+      return { value: line.line, next: line.next };
+    }
+    if (type === '$') {
+      const line = readLine(pos + 1);
+      if (!line) return null;
+      const len = Number(line.line);
+      if (len === -1) return { value: null, next: line.next };
+      const end = line.next + len;
+      if (buffer.length < end + 2) return null;
+      return { value: buffer.subarray(line.next, end).toString(), next: end + 2 };
+    }
+    if (type === '*') {
+      const line = readLine(pos + 1);
+      if (!line) return null;
+      const count = Number(line.line);
+      if (count === -1) return { value: null, next: line.next };
+      const values = [];
+      let next = line.next;
+      for (let i = 0; i < count; i++) {
+        const parsed = parseAt(next);
+        if (!parsed) return null;
+        values.push(parsed.value);
+        next = parsed.next;
+      }
+      return { value: values, next };
+    }
+    throw new Error('Unknown Redis RESP type: ' + type);
+  }
+
+  function drain() {
+    while (queue.length) {
+      let parsed;
+      try {
+        parsed = parseAt(0);
+      } catch (err) {
+        queue.shift().reject(err);
+        continue;
+      }
+      if (!parsed) return;
+      buffer = buffer.subarray(parsed.next);
+      queue.shift().resolve(parsed.value);
+    }
+  }
+
+  async function connect() {
+    if (socket && !socket.destroyed) return;
+    if (connecting) return connecting;
+    connecting = (async () => {
+    const openSocket = (useTls) => (useTls
+      ? tls.connect({ host: conf.host, port: conf.port, servername: conf.host })
+      : net.createConnection({ host: conf.host, port: conf.port }));
+
+    socket = openSocket(conf.tls);
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      drain();
+    });
+    socket.on('error', (err) => {
+      while (queue.length) queue.shift().reject(err);
+    });
+    socket.on('close', () => {
+      socket = undefined;
+      while (queue.length) queue.shift().reject(new Error('Redis connection closed'));
+    });
+    try {
+      await new Promise((resolve, reject) => {
+        socket.once('connect', resolve);
+        socket.once('error', reject);
+      });
+    } catch (err) {
+      if (conf.tls && options.forceTls === true && !fallbackToPlainTried) {
+        fallbackToPlainTried = true;
+        try { socket.destroy(); } catch (_) {}
+        conf.tls = false;
+        return connect();
+      }
+      throw err;
+    }
+    const sendRaw = (args) => new Promise((resolve, reject) => {
+      queue.push({ resolve, reject });
+      socket.write(encodeCommand(args));
+    });
+    if (conf.password) {
+      if (conf.username) await sendRaw(['AUTH', conf.username, conf.password]);
+      else await sendRaw(['AUTH', conf.password]);
+    }
+    if (conf.db) await sendRaw(['SELECT', conf.db]);
+    })();
+
+    try {
+      await connecting;
+    } finally {
+      connecting = null;
+    }
+  }
+
+  async function command(args, retries = 1) {
+    await connect();
+    try {
+      return await new Promise((resolve, reject) => {
+      queue.push({ resolve, reject });
+      socket.write(encodeCommand(args));
+    });
+    } catch (err) {
+      if (retries > 0) {
+        try { socket?.destroy(); } catch (_) {}
+        socket = undefined;
+        return command(args, retries - 1);
+      }
+      throw err;
+    }
+  }
+
+  return { command };
+}
 
 function toHeaders(nodeHeaders) {
   const headers = new Headers();
@@ -26,7 +188,10 @@ function getBody(req) {
 }
 
 function getEnv() {
-  return {
+  if (globalThis.__APP_ENV_CACHE) return globalThis.__APP_ENV_CACHE;
+  const dbType = (process.env.DB_TYPE || 'upstash').toLowerCase();
+  const env = {
+    DB_TYPE: dbType,
     UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
     UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
     DEFAULT_ADMIN_USER: process.env.DEFAULT_ADMIN_USER,
@@ -39,6 +204,13 @@ function getEnv() {
     CLOUDFLARE_TURNSTILE_SITE_KEY: process.env.CLOUDFLARE_TURNSTILE_SITE_KEY,
     CLOUDFLARE_TURNSTILE_SECRET_KEY: process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY
   };
+  if (dbType === 'redis' && process.env.REDIS_URL) {
+    env.REDIS_CLIENT = createRedisClient(process.env.REDIS_URL, {
+      forceTls: String(process.env.REDIS_TLS || '').toLowerCase() === 'true'
+    });
+  }
+  globalThis.__APP_ENV_CACHE = env;
+  return env;
 }
 
 const server = http.createServer(async (req, res) => {

@@ -47,6 +47,17 @@ const DB_STORE_CACHE = new WeakMap();
 function dbStore(env) {
   const cached = DB_STORE_CACHE.get(env);
   if (cached) return cached;
+  const dbType = (env.DB_TYPE || 'upstash').toLowerCase();
+
+  if (dbType === 'redis') {
+    if (!env.REDIS_CLIENT || typeof env.REDIS_CLIENT.command !== 'function') {
+      throw new Error('Missing REDIS_CLIENT bridge for DB_TYPE=redis. Use Node server runtime and set REDIS_URL.');
+    }
+    const redisStore = createRedisStore({ command: env.REDIS_CLIENT.command });
+    DB_STORE_CACHE.set(env, redisStore);
+    return redisStore;
+  }
+
   if (!env.UPSTASH_REDIS_REST_URL || !env.UPSTASH_REDIS_REST_TOKEN) {
     throw new Error('Missing Upstash Redis env: UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN');
   }
@@ -61,7 +72,10 @@ function dbStore(env) {
 function createRedisStore(redisConfig) {
   const META_PREFIX = '__meta:exp:';
 
-  async function command(args) {
+async function command(args) {
+    if (typeof redisConfig.command === 'function') {
+      return redisConfig.command(args);
+    }
     const baseUrl = redisConfig.url.replace(/\/$/, '');
     const res = await fetch(baseUrl, {
       method: 'POST',
