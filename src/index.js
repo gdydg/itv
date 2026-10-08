@@ -10,8 +10,10 @@ export default {
 
     if (path === '/api/cron' || path === '/api/cron/sync') return handleExternalCronSync(request, env, url);
 
-    // 公共频道接口 (返回纯文本)
+    // 公共频道纯文本接口
     if (path === '/api/public/channels') return handlePublicChannels(env);
+    // 可视化公共频道页面
+    if (path === '/channels') return html(renderPublicList());
 
     if (path.startsWith('/admin/api/')) {
       if (!await checkAuth(request, env)) {
@@ -285,7 +287,6 @@ async function handlePublicChannels(env) {
   for (const group in grouped) {
     txt += `${group},#genre#\n`;
     grouped[group].forEach((c) => {
-      // 只保留频道名，去掉逗号和后面的链接
       txt += `${c.name}\n`;
     });
   }
@@ -801,8 +802,6 @@ function generateFixedId(group, name, url) {
 
   try {
     const u = new URL(url);
-    
-    // ⬇️ 综合了所有动态参数（包含 B站 特有的和之前添加的）
     const dynamicParams = [
       'txSecret', 'txTime', 't', 'token', 'sign', 'auth_key', 'expire', 'expires', 
       'md5', 'wsSecret', 'wsTime', 'session', 'sid', 'uuid', 'v', 'auth_id', 'k', 'UID',
@@ -810,17 +809,11 @@ function generateFixedId(group, name, url) {
     ];
     dynamicParams.forEach((p) => u.searchParams.delete(p));
     
-    // ⬇️ 加入 B站 动态 CDN 节点和路径清洗逻辑
     if (u.hostname.includes('bilivideo.com')) {
-      // 强行统一主机名，消除 ov-gotcha207 这种动态前缀
       u.hostname = 'bilivideo.com';
-      // 提取核心的流路径 (比如 live_xxxx)，无视动态的外层目录
       const match = u.pathname.match(/(live_[^\/]+)/);
-      if (match) {
-        u.pathname = '/' + match[1];
-      }
+      if (match) u.pathname = '/' + match[1];
     }
-
     stableUrl = u.toString();
   } catch (_) {
     stableUrl = url.split('?')[0];
@@ -917,21 +910,74 @@ async function updateM3USource(env) {
   return { success: false, msg: '所有源均未找到有效频道。错误信息: ' + errors.join('; ') };
 }
 
+// ======================== HTML 渲染区域 ========================
+
+function renderPublicList() {
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>公共频道目录</title>
+  <style>
+    body{font-family:system-ui;background:#f4f4f5;margin:0;padding:20px}
+    .container{max-width:800px;margin:auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,.08)}
+    h1{text-align:center;color:#1f2937;margin-top:0}
+    .desc{text-align:center;color:#6b7280;font-size:14px;margin-bottom:20px}
+    .group-title{background:#f3f4f6;padding:8px 12px;margin-top:20px;border-radius:4px;font-weight:700;color:#374151;border-left:4px solid #8b5cf6}
+    .channel-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;padding:0 4px}
+    .channel-item{background:#eef2ff;padding:6px 12px;border-radius:20px;font-size:13px;color:#4f46e5;border:1px solid #c7d2fe}
+    .back-btn{display:block;width:120px;margin:30px auto 0;text-align:center;background:#8b5cf6;color:#fff;padding:10px;text-decoration:none;border-radius:4px;font-weight:500}
+  </style></head>
+  <body><div class="container">
+    <h1>📺 系统收录频道大全</h1>
+    <div class="desc">这里展示了系统当前收录的所有可用频道分类</div>
+    <div id="content"><div style="text-align:center;color:#999;">正在拉取频道数据...</div></div>
+    <a href="javascript:history.back()" class="back-btn">返回上一页</a>
+  </div>
+  <script>
+    fetch('/api/public/channels').then(r=>r.text()).then(text=>{
+      const lines = text.split('\\n');
+      let html = '';
+      let currentGroup = '';
+      let channels = [];
+      const flush = () => {
+        if(currentGroup && channels.length){
+          html += '<div class="group-title">' + currentGroup + ' <span style="font-weight:normal;color:#999;font-size:12px;">(' + channels.length + '个)</span></div>';
+          html += '<div class="channel-list">' + channels.map(c => '<span class="channel-item">' + c + '</span>').join('') + '</div>';
+        }
+      };
+      for(const line of lines){
+        const t = line.trim();
+        if(!t) continue;
+        if(t.endsWith(',#genre#')){
+          flush();
+          currentGroup = t.replace(',#genre#', '');
+          channels = [];
+        } else {
+          channels.push(t);
+        }
+      }
+      flush();
+      document.getElementById('content').innerHTML = html || '<div style="text-align:center;color:#666;">暂无收录频道</div>';
+    }).catch(e=>{
+      document.getElementById('content').innerHTML = '<div style="color:red;text-align:center;">数据加载失败，请刷新重试</div>';
+    });
+  </script></body></html>`;
+}
+
 function renderLoginPage(env = {}) {
   const turnstileSiteKey = escapeHtmlAttr(env.CLOUDFLARE_TURNSTILE_SITE_KEY || '');
   const turnstileScript = turnstileSiteKey ? '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>' : '';
   const turnstileWidget = turnstileSiteKey ? `<div class="turnstile-wrap"><div class="cf-turnstile" data-sitekey="${turnstileSiteKey}"></div></div>` : '';
 
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>系统登录/注册</title>${turnstileScript}
-  <style>body{font-family:system-ui;background:#f4f4f5;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.card{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 4px 6px rgba(0,0,0,.1);width:300px;text-align:center}input{width:100%;padding:10px;margin:10px 0;border:1px solid #ddd;border-radius:4px;box-sizing:border-box}button{color:#fff;border:none;padding:10px;border-radius:4px;cursor:pointer;width:100%;margin-top:10px;font-weight:700}.btn-login{background:#3b82f6}.btn-reg{background:#10b981}.oauth-btn{margin-top:15px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:400}.btn-linuxdo{background:#232323}.btn-nodeloc{background:#007bff}.turnstile-wrap{display:flex;justify-content:center;margin:14px 0 4px}.divider{margin:20px 0;color:#999;font-size:14px;display:flex;align-items:center}.divider::before,.divider::after{content:"";flex:1;border-bottom:1px solid #eee}.divider::before{margin-right:10px}.divider::after{margin-left:10px}</style>
-  </head><body><div class="card"><h2>订阅系统</h2><input type="text" id="user" placeholder="用户名"><input type="password" id="pass" placeholder="密码">${turnstileWidget}<button class="btn-login" onclick="doAction('login')">登录</button><button class="btn-reg" onclick="doAction('register')">注册新账号</button><div class="divider">或者</div><button class="oauth-btn btn-linuxdo" onclick="window.location.href='/api/auth/linuxdo'">使用 Linux DO 登录</button><button class="oauth-btn btn-nodeloc" onclick="window.location.href='/api/auth/nodeloc'">使用 NodeLoc 登录</button></div>
+  <style>body{font-family:system-ui;background:#f4f4f5;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}.card{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 4px 6px rgba(0,0,0,.1);width:300px;text-align:center}input{width:100%;padding:10px;margin:10px 0;border:1px solid #ddd;border-radius:4px;box-sizing:border-box}button{color:#fff;border:none;padding:10px;border-radius:4px;cursor:pointer;width:100%;margin-top:10px;font-weight:700}.btn-login{background:#3b82f6}.btn-reg{background:#10b981}.oauth-btn{margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:400;width:100%;box-sizing:border-box}.btn-linuxdo{background:#232323}.btn-nodeloc{background:#007bff}.turnstile-wrap{display:flex;justify-content:center;margin:14px 0 4px}.divider{margin:20px 0;color:#999;font-size:14px;display:flex;align-items:center}.divider::before,.divider::after{content:"";flex:1;border-bottom:1px solid #eee}.divider::before{margin-right:10px}.divider::after{margin-left:10px}</style>
+  </head><body><div class="card"><h2>订阅系统</h2><input type="text" id="user" placeholder="用户名"><input type="password" id="pass" placeholder="密码">${turnstileWidget}<button class="btn-login" onclick="doAction('login')">登录</button><button class="btn-reg" onclick="doAction('register')">注册新账号</button>
+  <div class="divider">公共资源</div><button class="oauth-btn" style="background:#8b5cf6;" onclick="window.location.href='/channels'">📺 查看公共频道列表</button>
+  <div class="divider">其他方式登录</div><button class="oauth-btn btn-linuxdo" onclick="window.location.href='/api/auth/linuxdo'">使用 Linux DO 登录</button><button class="oauth-btn btn-nodeloc" onclick="window.location.href='/api/auth/nodeloc'">使用 NodeLoc 登录</button></div>
   <script>async function doAction(action){const u=document.getElementById('user').value;const p=document.getElementById('pass').value;const t=document.querySelector('[name=\"cf-turnstile-response\"]')?.value||'';if(!u||!p)return alert('请输入账密');const res=await fetch('/api/user/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,turnstileToken:t})});const data=await res.json();if(data.success){if(action==='register'){alert('注册成功，请登录！');window.turnstile?.reset();}else window.location.href='/'}else{alert(data.msg);window.turnstile?.reset();}}</script></body></html>`;
 }
 
 function renderUserDashboard(username) {
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>用户控制台</title>
   <style>body{font-family:system-ui;background:#f9fafb;margin:0;padding:20px}.container{max-width:1000px;margin:auto}.card{background:#fff;padding:20px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);margin-bottom:20px}.notice-card{background:#eff6ff;border-left:4px solid #3b82f6;color:#1e3a8a}input{padding:8px;border:1px solid #ddd;border-radius:4px}button{background:#3b82f6;color:#fff;border:none;padding:8px 12px;border-radius:4px;cursor:pointer;font-size:12px;margin-bottom:4px}.warning{background:#f59e0b}.btn-manage{background:#6366f1}table{width:100%;border-collapse:collapse;margin-top:15px;font-size:14px}th,td{padding:10px;text-align:left;border-bottom:1px solid #ddd}.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}.copy-group{display:flex;flex-wrap:wrap;gap:5px}.btn-m3u{background:#10b981}.btn-txt{background:#8b5cf6}.btn-tvb{background:#ec4899}.notice-text{font-size:12px;color:#854d0e;background:#fef08a;padding:4px 8px;border-radius:4px;display:inline-block;margin-top:4px}</style>
-  </head><body><div class="container"><div class="header"><h1>欢迎回来, ${username}</h1><button class="warning" onclick="logout()" style="font-size:14px;">退出登录</button></div>
+  </head><body><div class="container"><div class="header"><h1>欢迎回来, ${username}</h1><div><button onclick="window.location.href='/channels'" style="font-size:14px;background:#8b5cf6;margin-right:10px;">📺 查看所有频道目录</button><button class="warning" onclick="logout()" style="font-size:14px;">退出登录</button></div></div>
   <div id="noticeBox" class="card notice-card" style="display:none;"><h3>🔔 系统通知</h3><div id="noticeContent"></div></div>
   <div class="card"><h2>绑定新 Token</h2><div style="display:flex;gap:10px;"><input type="text" id="bindToken" placeholder="输入 Token" style="flex:1;"><button onclick="bind()" style="font-size:14px;">立即绑定</button></div></div>
   <div class="card" style="overflow-x:auto;"><h2>我的订阅列表</h2><table><thead><tr><th>Token</th><th>状态/限制</th><th>过期时间</th><th>管理员注意事项</th><th>复制订阅链接</th><th>操作</th></tr></thead><tbody id="list"></tbody></table></div>
