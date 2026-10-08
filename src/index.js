@@ -10,6 +10,9 @@ export default {
 
     if (path === '/api/cron' || path === '/api/cron/sync') return handleExternalCronSync(request, env, url);
 
+    // 公共频道接口 (返回纯文本)
+    if (path === '/api/public/channels') return handlePublicChannels(env);
+
     if (path.startsWith('/admin/api/')) {
       if (!await checkAuth(request, env)) {
         return new Response('Unauthorized', { status: 401, headers: { 'WWW-Authenticate': 'Basic' } });
@@ -266,6 +269,34 @@ async function getAuthorizedChannels(env, token) {
   if (groupsStr === '*') return channels;
   const allowedGroups = groupsStr.split(',').map((g) => g.trim()).filter(Boolean);
   return channels.filter((c) => allowedGroups.includes(c.sourceGroup || '默认'));
+}
+
+async function handlePublicChannels(env) {
+  const channels = safeJsonParse(await dbStore(env).get('data:channels'), []);
+  
+  const grouped = {};
+  channels.forEach((c) => {
+    const group = c.group || '未分类';
+    if (!grouped[group]) grouped[group] = [];
+    grouped[group].push(c);
+  });
+
+  let txt = '';
+  for (const group in grouped) {
+    txt += `${group},#genre#\n`;
+    grouped[group].forEach((c) => {
+      // 只保留频道名，去掉逗号和后面的链接
+      txt += `${c.name}\n`;
+    });
+  }
+
+  return new Response(txt, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=300'
+    }
+  });
 }
 
 async function handleExternalCronSync(request, env, url) {
